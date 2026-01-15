@@ -1,7 +1,7 @@
 {
-  "name": "vmusic-desktop",
+  "name": "ntmusic-desktop",
   "version": "0.1.0",
-  "description": "VMusic Desktop (skeleton)",
+  "description": "NTmusic Desktop (prototype)",
   "main": "src/main.js",
   "private": true,
   "scripts": {
@@ -20,8 +20,8 @@
     "node-fetch": "^3.3.2"
   },
   "build": {
-    "appId": "com.vcp.vmusic",
-    "productName": "VMusic",
+    "appId": "com.derstedt.ntmusic",
+    "productName": "NTmusic",
     "directories": {
       "output": "dist"
     },
