@@ -19,6 +19,7 @@ vmusic/
 - `VMUSIC_ENGINE_URL`：覆盖 UI 访问的引擎地址
 - `VMUSIC_ENGINE_PORT`：覆盖引擎启动端口（主进程会传入）
 - `VMUSIC_ASSET_DIR`：`ffmpeg.exe` 所在目录
+- `VMUSIC_SOXR_DIR`（预留）：`soxr.dll`/`soxr.lib` 所在目录
 
 ## 复用来源
 - UI：`D:\AI bot\VCPChat\Musicmodules`
