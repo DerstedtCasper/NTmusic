@@ -4,3 +4,5 @@ AppData/
 node_modules/
 dist/
 *.log
+target/
+**/target/
