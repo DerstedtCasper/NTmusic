@@ -49,8 +49,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const eqSection = document.getElementById('eq-section');
   const eqTypeSelect = document.getElementById('eq-type-select');
   const ditherSwitch = document.getElementById('dither-switch');
+  const ditherTypeSelect = document.getElementById('dither-type-select');
   const replaygainSwitch = document.getElementById('replaygain-switch');
   const upsamplingSelect = document.getElementById('upsampling-select');
+  const resamplerSelect = document.getElementById('resampler-select');
   const lyricsContainer = document.getElementById('lyrics-container');
   const lyricsList = document.getElementById('lyrics-list');
 
@@ -541,8 +543,22 @@ class WebNowPlayingAdapter {
       if (state.dither_enabled !== undefined && ditherSwitch.checked !== state.dither_enabled) {
           ditherSwitch.checked = state.dither_enabled;
       }
+      if (ditherTypeSelect && !ditherTypeSelect.matches(':focus')) {
+          const ditherType = state.dither_type || (state.dither_enabled ? 'tpdf' : 'off');
+          const ditherBits = state.dither_bits || 24;
+          let desiredDither = 'off';
+          if (ditherType !== 'off' && state.dither_enabled !== false) {
+              desiredDither = ditherBits === 16 ? 'tpdf16' : 'tpdf24';
+          }
+          if (ditherTypeSelect.value !== desiredDither) {
+              ditherTypeSelect.value = desiredDither;
+          }
+      }
       if (state.replaygain_enabled !== undefined && replaygainSwitch.checked !== state.replaygain_enabled) {
           replaygainSwitch.checked = state.replaygain_enabled;
+      }
+      if (resamplerSelect && state.resampler_mode && resamplerSelect.value !== state.resampler_mode && !resamplerSelect.matches(':focus')) {
+          resamplerSelect.value = state.resampler_mode;
       }
       if (state.eq_bands) {
           for (const [band, gain] of Object.entries(state.eq_bands)) {
@@ -1067,14 +1083,37 @@ class WebNowPlayingAdapter {
 
   const updateOptimizations = async () => {
       if (!window.electron) return;
+      const ditherChoice = ditherTypeSelect ? ditherTypeSelect.value : (ditherSwitch.checked ? 'tpdf24' : 'off');
+      const ditherBits = ditherChoice === 'tpdf16' ? 16 : 24;
+      const ditherEnabled = ditherSwitch.checked && ditherChoice !== 'off';
+      const ditherType = ditherEnabled ? 'tpdf' : 'off';
+      const resamplerMode = resamplerSelect ? resamplerSelect.value : 'auto';
       await window.electron.invoke('music-configure-optimizations', {
-          dither_enabled: ditherSwitch.checked,
-          replaygain_enabled: replaygainSwitch.checked
+          dither_enabled: ditherEnabled,
+          dither_type: ditherType,
+          dither_bits: ditherBits,
+          replaygain_enabled: replaygainSwitch.checked,
+          resampler_mode: resamplerMode,
+          resampler_quality: 'hq'
       });
   };
 
-  ditherSwitch.addEventListener('change', updateOptimizations);
+  ditherSwitch.addEventListener('change', () => {
+      if (ditherTypeSelect) {
+          ditherTypeSelect.value = ditherSwitch.checked ? (ditherTypeSelect.value === 'off' ? 'tpdf24' : ditherTypeSelect.value) : 'off';
+      }
+      updateOptimizations();
+  });
+  if (ditherTypeSelect) {
+      ditherTypeSelect.addEventListener('change', () => {
+          ditherSwitch.checked = ditherTypeSelect.value !== 'off';
+          updateOptimizations();
+      });
+  }
   replaygainSwitch.addEventListener('change', updateOptimizations);
+  if (resamplerSelect) {
+      resamplerSelect.addEventListener('change', updateOptimizations);
+  }
 
   eqPresetSelect.addEventListener('change', (e) => {
        applyEqPreset(e.target.value);
@@ -1556,8 +1595,18 @@ class WebNowPlayingAdapter {
            if (initialDeviceState.state.dither_enabled !== undefined) {
                ditherSwitch.checked = initialDeviceState.state.dither_enabled;
            }
+           if (ditherTypeSelect) {
+               const ditherType = initialDeviceState.state.dither_type || (initialDeviceState.state.dither_enabled ? 'tpdf' : 'off');
+               const ditherBits = initialDeviceState.state.dither_bits || 24;
+               ditherTypeSelect.value = (ditherType !== 'off' && initialDeviceState.state.dither_enabled !== false)
+                   ? (ditherBits === 16 ? 'tpdf16' : 'tpdf24')
+                   : 'off';
+           }
            if (initialDeviceState.state.replaygain_enabled !== undefined) {
                replaygainSwitch.checked = initialDeviceState.state.replaygain_enabled;
+           }
+           if (resamplerSelect && initialDeviceState.state.resampler_mode !== undefined) {
+               resamplerSelect.value = initialDeviceState.state.resampler_mode;
            }
            if (initialDeviceState.state.eq_bands) {
                 for (const [band, gain] of Object.entries(initialDeviceState.state.eq_bands)) {

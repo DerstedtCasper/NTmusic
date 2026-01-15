@@ -172,6 +172,15 @@
                         </label>
                     </div>
 
+                    <div class="setting-item">
+                        <label for="dither-type-select">Dither Type</label>
+                        <select id="dither-type-select" class="compact-select">
+                            <option value="off">Off</option>
+                            <option value="tpdf16">TPDF 16</option>
+                            <option value="tpdf24">TPDF 24</option>
+                        </select>
+                    </div>
+
                     <!-- ReplayGain -->
                     <div class="setting-item toggle-item">
                         <label for="replaygain-switch">动态增益</label>
@@ -179,6 +188,15 @@
                             <input type="checkbox" id="replaygain-switch" checked>
                             <span class="slider round"></span>
                         </label>
+                    </div>
+
+                    <div class="setting-item">
+                        <label for="resampler-select">Resampler</label>
+                        <select id="resampler-select" class="compact-select">
+                            <option value="auto">Auto</option>
+                            <option value="rubato">Rubato</option>
+                            <option value="soxr">Soxr</option>
+                        </select>
                     </div>
                 </div>
 

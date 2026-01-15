@@ -39,6 +39,10 @@ function getAppDataRoot() {
     return app.isPackaged ? app.getPath('userData') : path.join(getAppRoot(), 'AppData');
 }
 
+function getSoxrDir() {
+    return path.join(getAppDataRoot(), 'deps', 'soxr');
+}
+
 function resolveEngineBinary() {
     const executable = process.platform === 'win32' ? 'vmusic_engine.exe' : 'vmusic_engine';
     const appRoot = getAppRoot();
@@ -61,6 +65,7 @@ function resolveEngineBinary() {
 async function ensureAppDataDirs() {
     const appDataRoot = getAppDataRoot();
     await fs.ensureDir(appDataRoot);
+    await fs.ensureDir(getSoxrDir());
 }
 
 function startAudioEngine() {
@@ -76,11 +81,13 @@ function startAudioEngine() {
             return;
         }
         const engineDir = path.dirname(enginePath);
+        const soxrDir = process.env.VMUSIC_SOXR_DIR || getSoxrDir();
         const env = {
             ...process.env,
             VMUSIC_ENGINE_PORT: String(ENGINE_PORT),
             VMUSIC_ENGINE_URL: ENGINE_URL,
-            VMUSIC_ASSET_DIR: engineDir
+            VMUSIC_ASSET_DIR: engineDir,
+            VMUSIC_SOXR_DIR: soxrDir
         };
 
         audioEngineProcess = spawn(enginePath, [], { cwd: engineDir, env });
