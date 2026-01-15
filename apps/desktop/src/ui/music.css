@@ -504,6 +504,25 @@ body.light-theme .album-art {
     width: 24px;
     height: 24px;
 }
+
+.status-chip {
+    font-size: 0.75em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--hover-bg);
+    color: var(--music-text-secondary);
+    border: 1px solid var(--glass-border);
+}
+
+.status-chip.available {
+    color: var(--music-highlight);
+    border-color: var(--music-highlight);
+}
+
+.status-chip.missing {
+    color: #e04848;
+    border-color: rgba(224, 72, 72, 0.6);
+}
 #mode-btn:hover {
     background-color: var(--music-text);
 }

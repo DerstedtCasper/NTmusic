@@ -53,6 +53,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const replaygainSwitch = document.getElementById('replaygain-switch');
   const upsamplingSelect = document.getElementById('upsampling-select');
   const resamplerSelect = document.getElementById('resampler-select');
+  const soxrStatus = document.getElementById('soxr-status');
   const lyricsContainer = document.getElementById('lyrics-container');
   const lyricsList = document.getElementById('lyrics-list');
 
@@ -286,6 +287,28 @@ let isDraggingProgress = false;
             return;
         }
         bufferStatusEl.textContent = `缓冲 ${Math.round(payload.buffered_ms)}ms`;
+    };
+
+    const updateSoxrIndicator = (available) => {
+        if (!soxrStatus) return;
+        if (available === undefined || available === null) {
+            soxrStatus.textContent = 'Unknown';
+            soxrStatus.classList.remove('available', 'missing');
+            return;
+        }
+        const isAvailable = Boolean(available);
+        soxrStatus.textContent = isAvailable ? 'Available' : 'Missing';
+        soxrStatus.classList.toggle('available', isAvailable);
+        soxrStatus.classList.toggle('missing', !isAvailable);
+        if (resamplerSelect) {
+            const soxrOption = resamplerSelect.querySelector('option[value="soxr"]');
+            if (soxrOption) {
+                soxrOption.disabled = !isAvailable;
+            }
+            if (!isAvailable && resamplerSelect.value === 'soxr') {
+                resamplerSelect.value = 'auto';
+            }
+        }
     };
 
 // --- Rainmeter WebNowPlaying Adapter ---
@@ -559,6 +582,9 @@ class WebNowPlayingAdapter {
       }
       if (resamplerSelect && state.resampler_mode && resamplerSelect.value !== state.resampler_mode && !resamplerSelect.matches(':focus')) {
           resamplerSelect.value = state.resampler_mode;
+      }
+      if (state.soxr_available !== undefined) {
+          updateSoxrIndicator(state.soxr_available);
       }
       if (state.eq_bands) {
           for (const [band, gain] of Object.entries(state.eq_bands)) {
@@ -1607,6 +1633,9 @@ class WebNowPlayingAdapter {
            }
            if (resamplerSelect && initialDeviceState.state.resampler_mode !== undefined) {
                resamplerSelect.value = initialDeviceState.state.resampler_mode;
+           }
+           if (initialDeviceState.state.soxr_available !== undefined) {
+               updateSoxrIndicator(initialDeviceState.state.soxr_available);
            }
            if (initialDeviceState.state.eq_bands) {
                 for (const [band, gain] of Object.entries(initialDeviceState.state.eq_bands)) {
