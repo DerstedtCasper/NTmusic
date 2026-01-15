@@ -8,18 +8,22 @@ use axum::{
 };
 use axum::extract::ws::{Message, WebSocket};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ringbuf::{Consumer, HeapRb, Producer};
+use libloading::Library;
+use ringbuf::{HeapCons, HeapProd, HeapRb};
+use ringbuf::traits::{Consumer, Producer, Split};
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    ffi::CStr,
     fs::File,
     io::Read,
+    os::raw::{c_char, c_void},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -38,12 +42,18 @@ use tracing::{error, info};
 struct SharedState {
     inner: Arc<Mutex<EngineState>>,
     tx: broadcast::Sender<String>,
-    producer: Arc<Mutex<Producer<f32>>>,
-    consumer: Arc<Mutex<Consumer<f32>>>,
-    output_stream: Arc<Mutex<Option<cpal::Stream>>>,
+    producer: Arc<Mutex<HeapProd<f32>>>,
+    consumer: Arc<Mutex<HeapCons<f32>>>,
+    output_stream: Arc<Mutex<OutputStreamHolder>>,
     stream_process: Arc<Mutex<Option<Child>>>,
     stream_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
+
+struct OutputStreamHolder(Option<cpal::Stream>);
+
+// cpal::Stream is !Send/Sync on some platforms; we guard access via a mutex.
+unsafe impl Send for OutputStreamHolder {}
+unsafe impl Sync for OutputStreamHolder {}
 
 #[derive(Debug, Clone, Serialize)]
 struct PlaybackState {
@@ -183,6 +193,97 @@ fn initial_dither_seed() -> u64 {
         .unwrap_or(0x1234_5678_9abc_def0)
 }
 
+type SoxrHandle = *mut c_void;
+type SoxrError = *const c_char;
+type SoxrCreateFn = unsafe extern "C" fn(
+    f64,
+    f64,
+    u32,
+    *mut SoxrError,
+    *const c_void,
+    *const c_void,
+    *const c_void,
+) -> SoxrHandle;
+type SoxrProcessFn = unsafe extern "C" fn(
+    SoxrHandle,
+    *const c_void,
+    usize,
+    *mut usize,
+    *mut c_void,
+    usize,
+    *mut usize,
+) -> SoxrError;
+type SoxrDeleteFn = unsafe extern "C" fn(SoxrHandle);
+
+struct SoxrLibrary {
+    _lib: Library,
+    create: SoxrCreateFn,
+    process: SoxrProcessFn,
+    delete: SoxrDeleteFn,
+}
+
+impl SoxrLibrary {
+    unsafe fn load(path: &Path) -> Result<Self> {
+        let lib = Library::new(path).context("load soxr library")?;
+        let create = *lib
+            .get::<SoxrCreateFn>(b"soxr_create\0")
+            .context("load soxr_create")?;
+        let process = *lib
+            .get::<SoxrProcessFn>(b"soxr_process\0")
+            .context("load soxr_process")?;
+        let delete = *lib
+            .get::<SoxrDeleteFn>(b"soxr_delete\0")
+            .context("load soxr_delete")?;
+        Ok(SoxrLibrary {
+            _lib: lib,
+            create,
+            process,
+            delete,
+        })
+    }
+}
+
+struct SoxrInstance {
+    handle: SoxrHandle,
+    lib: Arc<SoxrLibrary>,
+}
+
+impl SoxrInstance {
+    fn new(lib: Arc<SoxrLibrary>, in_rate: u32, out_rate: u32, channels: usize) -> Result<Self> {
+        let mut err: SoxrError = std::ptr::null();
+        let handle = unsafe {
+            (lib.create)(
+                in_rate as f64,
+                out_rate as f64,
+                channels as u32,
+                &mut err,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if !err.is_null() || handle.is_null() {
+            let message = if err.is_null() {
+                "unknown soxr error".to_string()
+            } else {
+                unsafe { CStr::from_ptr(err).to_string_lossy().into_owned() }
+            };
+            return Err(anyhow!("soxr_create failed: {}", message));
+        }
+        Ok(SoxrInstance { handle, lib })
+    }
+}
+
+impl Drop for SoxrInstance {
+    fn drop(&mut self) {
+        unsafe {
+            (self.lib.delete)(self.handle);
+        }
+    }
+}
+
+static SOXR_LIB: OnceLock<Option<Arc<SoxrLibrary>>> = OnceLock::new();
+
 fn soxr_candidate_names() -> &'static [&'static str] {
     if cfg!(target_os = "windows") {
         &["soxr.dll", "libsoxr.dll"]
@@ -193,7 +294,8 @@ fn soxr_candidate_names() -> &'static [&'static str] {
     }
 }
 
-fn detect_soxr_available() -> bool {
+fn soxr_library_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
     let mut dirs = Vec::new();
     if let Ok(dir) = std::env::var("VMUSIC_SOXR_DIR") {
         dirs.push(PathBuf::from(dir));
@@ -203,12 +305,31 @@ fn detect_soxr_available() -> bool {
     }
     for dir in dirs {
         for name in soxr_candidate_names() {
-            if dir.join(name).exists() {
-                return true;
-            }
+            candidates.push(dir.join(name));
         }
     }
-    false
+    for name in soxr_candidate_names() {
+        candidates.push(PathBuf::from(name));
+    }
+    candidates
+}
+
+fn soxr_library() -> Option<Arc<SoxrLibrary>> {
+    SOXR_LIB
+        .get_or_init(|| {
+            for candidate in soxr_library_candidates() {
+                if let Ok(lib) = unsafe { SoxrLibrary::load(&candidate) } {
+                    info!("soxr loaded from {}", candidate.display());
+                    return Some(Arc::new(lib));
+                }
+            }
+            None
+        })
+        .clone()
+}
+
+fn detect_soxr_available() -> bool {
+    soxr_library().is_some()
 }
 
 fn initial_state() -> EngineState {
@@ -428,7 +549,7 @@ fn start_stream_reader(shared: SharedState, mut child: Child) {
                         ]);
                         offset += 4;
                         if let Ok(mut prod) = producer.lock() {
-                            if prod.push(sample).is_ok() {
+                            if prod.try_push(sample).is_ok() {
                                 sample_count += 1;
                                 if sample_count % channels == 0 {
                                     if let Ok(mut s) = state.lock() {
@@ -518,13 +639,13 @@ fn decode_file(path: &str) -> Result<(Vec<f32>, u32, usize, f64)> {
         };
         match decoded {
             AudioBufferRef::F32(buf) => {
-                let spec = buf.spec();
+                let spec = *buf.spec();
                 let mut sample_buf = SampleBuffer::<f32>::new(buf.capacity() as u64, spec);
-                sample_buf.copy_interleaved_ref(buf);
+                sample_buf.copy_interleaved_ref(AudioBufferRef::F32(buf));
                 samples.extend_from_slice(sample_buf.samples());
             }
             _ => {
-                let spec = decoded.spec();
+                let spec = *decoded.spec();
                 let mut sample_buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
                 sample_buf.copy_interleaved_ref(decoded);
                 samples.extend_from_slice(sample_buf.samples());
@@ -646,6 +767,98 @@ fn resample_audio(
     Ok(output)
 }
 
+fn resample_audio_soxr(
+    data: &[f32],
+    channels: usize,
+    from_rate: u32,
+    to_rate: u32,
+) -> Result<Vec<f32>> {
+    if data.is_empty() || channels == 0 || from_rate == 0 || to_rate == 0 {
+        return Ok(data.to_vec());
+    }
+    if from_rate == to_rate {
+        return Ok(data.to_vec());
+    }
+
+    let frames = data.len() / channels;
+    if frames == 0 {
+        return Ok(Vec::new());
+    }
+
+    let lib = soxr_library().ok_or_else(|| anyhow!("soxr library not available"))?;
+    let instance = SoxrInstance::new(lib, from_rate, to_rate, channels)?;
+    let ratio = to_rate as f64 / from_rate as f64;
+    let mut output = Vec::with_capacity(((frames as f64 * ratio).ceil() as usize + 256) * channels);
+
+    let mut offset = 0usize;
+    let chunk_frames = 8192usize;
+    while offset < frames {
+        let frames_in = (frames - offset).min(chunk_frames);
+        let in_start = offset * channels;
+        let in_end = in_start + frames_in * channels;
+        let in_slice = &data[in_start..in_end];
+
+        let out_capacity_frames = ((frames_in as f64 * ratio).ceil() as usize + 64).max(1);
+        let mut out_chunk = vec![0.0f32; out_capacity_frames * channels];
+        let mut idone = 0usize;
+        let mut odone = 0usize;
+        let err = unsafe {
+            (instance.lib.process)(
+                instance.handle,
+                in_slice.as_ptr() as *const c_void,
+                frames_in,
+                &mut idone,
+                out_chunk.as_mut_ptr() as *mut c_void,
+                out_capacity_frames,
+                &mut odone,
+            )
+        };
+        if !err.is_null() {
+            let message = unsafe { CStr::from_ptr(err).to_string_lossy().into_owned() };
+            return Err(anyhow!("soxr_process failed: {}", message));
+        }
+        if idone != frames_in {
+            return Err(anyhow!(
+                "soxr_process consumed {} of {} frames",
+                idone,
+                frames_in
+            ));
+        }
+        if odone > 0 {
+            output.extend_from_slice(&out_chunk[..odone * channels]);
+        }
+        offset += idone;
+    }
+
+    loop {
+        let out_capacity_frames = 1024usize;
+        let mut out_chunk = vec![0.0f32; out_capacity_frames * channels];
+        let mut idone = 0usize;
+        let mut odone = 0usize;
+        let err = unsafe {
+            (instance.lib.process)(
+                instance.handle,
+                std::ptr::null(),
+                0,
+                &mut idone,
+                out_chunk.as_mut_ptr() as *mut c_void,
+                out_capacity_frames,
+                &mut odone,
+            )
+        };
+        if !err.is_null() {
+            let message = unsafe { CStr::from_ptr(err).to_string_lossy().into_owned() };
+            return Err(anyhow!("soxr_process flush failed: {}", message));
+        }
+        if odone == 0 {
+            break;
+        }
+        output.extend_from_slice(&out_chunk[..odone * channels]);
+    }
+
+    Ok(output)
+}
+
 fn compute_spectrum(samples: &[f32], sample_rate: u32, fft_size: usize, bins: usize) -> Vec<f32> {
     if samples.is_empty() || sample_rate == 0 {
         return vec![0.0; bins];
@@ -665,7 +878,7 @@ fn compute_spectrum(samples: &[f32], sample_rate: u32, fft_size: usize, bins: us
         mags.push(input[i].norm());
     }
 
-    let min_freq = 20.0;
+    let min_freq = 20.0f32;
     let max_freq = (sample_rate as f32) / 2.0;
     if max_freq <= min_freq {
         return vec![0.0; bins];
@@ -683,8 +896,8 @@ fn compute_spectrum(samples: &[f32], sample_rate: u32, fft_size: usize, bins: us
         }
     }
     for v in out.iter_mut() {
-        let db = 20.0 * (v + 1e-9).log10();
-        let norm = ((db + 90.0) / 90.0).clamp(0.0, 1.0);
+        let db = 20.0f32 * (*v + 1e-9f32).log10();
+        let norm = ((db + 90.0f32) / 90.0f32).clamp(0.0f32, 1.0f32);
         *v = norm;
     }
     out
@@ -726,7 +939,7 @@ fn apply_dither_if_needed(state: &Arc<Mutex<EngineState>>, data: &mut [f32], tar
 }
 fn ensure_output_stream(shared: &SharedState) -> Result<()> {
     let mut guard = shared.output_stream.lock().unwrap();
-    if guard.is_some() {
+    if guard.0.is_some() {
         return Ok(());
     }
 
@@ -768,7 +981,7 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
                 fill_output_buffer(&state, &consumer, &mut temp);
                 apply_dither_if_needed(&state, &mut temp, 16);
                 for (dst, src) in data.iter_mut().zip(temp.iter()) {
-                    *dst = cpal::Sample::from::<f32>(src);
+                    *dst = cpal::Sample::from_sample(*src);
                 }
             },
             err_fn,
@@ -781,7 +994,7 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
                 fill_output_buffer(&state, &consumer, &mut temp);
                 apply_dither_if_needed(&state, &mut temp, 16);
                 for (dst, src) in data.iter_mut().zip(temp.iter()) {
-                    *dst = cpal::Sample::from::<f32>(src);
+                    *dst = cpal::Sample::from_sample(*src);
                 }
             },
             err_fn,
@@ -791,11 +1004,11 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
     };
 
     stream.play()?;
-    *guard = Some(stream);
+    guard.0 = Some(stream);
     Ok(())
 }
 
-fn fill_output_buffer(state: &Arc<Mutex<EngineState>>, consumer: &Arc<Mutex<Consumer<f32>>>, data: &mut [f32]) {
+fn fill_output_buffer(state: &Arc<Mutex<EngineState>>, consumer: &Arc<Mutex<HeapCons<f32>>>, data: &mut [f32]) {
     let frames = data.len();
     let mut local = state.lock().unwrap();
     if !local.is_playing || local.is_paused {
@@ -825,7 +1038,7 @@ fn fill_output_buffer(state: &Arc<Mutex<EngineState>>, consumer: &Arc<Mutex<Cons
             let mut consumed = 0usize;
             if let Ok(mut cons) = consumer.lock() {
                 for sample in data.iter_mut() {
-                    if let Some(v) = cons.pop() {
+                    if let Some(v) = cons.try_pop() {
                         *sample = v;
                         consumed += 1;
                     } else {
@@ -859,7 +1072,7 @@ fn list_devices() -> Value {
     for host_id in cpal::available_hosts() {
         if let Ok(host) = cpal::host_from_id(host_id) {
             if let Ok(devices) = host.output_devices() {
-                for device in devices.flatten() {
+                for device in devices {
                     let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
                     let sample_rate = device
                         .default_output_config()
@@ -892,7 +1105,7 @@ fn find_device_by_id(target: usize) -> Option<cpal::Device> {
     for host_id in cpal::available_hosts() {
         if let Ok(host) = cpal::host_from_id(host_id) {
             if let Ok(devices) = host.output_devices() {
-                for device in devices.flatten() {
+                for device in devices {
                     if index == target {
                         return Some(device);
                     }
@@ -911,7 +1124,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<SharedState>) -> i
 async fn handle_socket(mut socket: WebSocket, state: SharedState) {
     let mut rx = state.tx.subscribe();
     while let Ok(msg) = rx.recv().await {
-        if socket.send(Message::Text(msg)).await.is_err() {
+        if socket.send(Message::Text(msg.into())).await.is_err() {
             break;
         }
     }
@@ -966,27 +1179,48 @@ async fn load_handler(State(shared): State<SharedState>, Json(req): Json<LoadReq
         if target > 0 && target != sample_rate {
             let mode = normalize_resampler_mode(&resampler_mode);
             let quality = normalize_resampler_quality(&resampler_quality);
-            if mode == "soxr" {
-                let message = if soxr_available {
-                    "soxr selected but not available in engine yet"
-                } else {
-                    "soxr resampler not available"
-                };
-                return (StatusCode::BAD_REQUEST, Json(json!({
-                    "status": "error",
-                    "message": message
-                })));
-            }
-            match resample_audio(&final_data, channels, sample_rate, target, &quality) {
-                Ok(resampled) => {
-                    final_data = resampled;
-                    final_sample_rate = target;
+            let prefer_soxr = mode == "soxr" || (mode == "auto" && soxr_available);
+            if prefer_soxr {
+                match resample_audio_soxr(&final_data, channels, sample_rate, target) {
+                    Ok(resampled) => {
+                        final_data = resampled;
+                        final_sample_rate = target;
+                    }
+                    Err(err) => {
+                        if mode == "auto" {
+                            error!("soxr resample failed, falling back to rubato: {}", err);
+                            match resample_audio(&final_data, channels, sample_rate, target, &quality) {
+                                Ok(resampled) => {
+                                    final_data = resampled;
+                                    final_sample_rate = target;
+                                }
+                                Err(err) => {
+                                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                                        "status": "error",
+                                        "message": format!("resample failed: {}", err)
+                                    })));
+                                }
+                            }
+                        } else {
+                            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                                "status": "error",
+                                "message": format!("soxr resample failed: {}", err)
+                            })));
+                        }
+                    }
                 }
-                Err(err) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                        "status": "error",
-                        "message": format!("resample failed: {}", err)
-                    })));
+            } else {
+                match resample_audio(&final_data, channels, sample_rate, target, &quality) {
+                    Ok(resampled) => {
+                        final_data = resampled;
+                        final_sample_rate = target;
+                    }
+                    Err(err) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                            "status": "error",
+                            "message": format!("resample failed: {}", err)
+                        })));
+                    }
                 }
             }
         }
@@ -1015,7 +1249,7 @@ async fn load_handler(State(shared): State<SharedState>, Json(req): Json<LoadReq
     let _ = ensure_output_stream(&shared);
     send_state(&shared);
     let state = shared.inner.lock().unwrap();
-    Json(json!({ "status": "success", "state": build_state_view(&state) }))
+    (StatusCode::OK, Json(json!({ "status": "success", "state": build_state_view(&state) })))
 }
 
 async fn play_handler(State(shared): State<SharedState>) -> impl IntoResponse {
@@ -1102,7 +1336,7 @@ async fn configure_output_handler(State(shared): State<SharedState>, Json(req): 
             state.exclusive_mode = exclusive;
         }
     }
-    *shared.output_stream.lock().unwrap() = None;
+    shared.output_stream.lock().unwrap().0 = None;
     let _ = ensure_output_stream(&shared);
     send_state(&shared);
     let state = shared.inner.lock().unwrap();
@@ -1329,7 +1563,7 @@ async fn main() -> Result<()> {
         tx,
         producer: Arc::new(Mutex::new(producer)),
         consumer: Arc::new(Mutex::new(consumer)),
-        output_stream: Arc::new(Mutex::new(None)),
+        output_stream: Arc::new(Mutex::new(OutputStreamHolder(None))),
         stream_process: Arc::new(Mutex::new(None)),
         stream_thread: Arc::new(Mutex::new(None)),
     };
