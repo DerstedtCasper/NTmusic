@@ -106,6 +106,9 @@ let isDraggingProgress = false;
     let animationFrameId;
     let targetVisualizerData = [];
     let currentVisualizerData = [];
+    let spectrumSharedView = null;
+    let spectrumSharedBins = 0;
+    let useSharedSpectrum = false;
     const easingFactor = 0.2; // 缓动因子，值越小动画越平滑
     let bassScale = 1.0; // 用于专辑封面 Bass 动画
     const BASS_BOOST = 1.06; // Bass 触发时的放大系数
@@ -163,6 +166,36 @@ let isDraggingProgress = false;
         }
     };
 
+    const writeSpectrumToShared = (data) => {
+        if (!spectrumSharedView || !Array.isArray(data)) return;
+        const len = Math.min(spectrumSharedView.length, data.length);
+        for (let i = 0; i < len; i++) {
+            spectrumSharedView[i] = data[i];
+        }
+        if (len < spectrumSharedView.length) {
+            spectrumSharedView.fill(0, len);
+        }
+    };
+
+    const initNtaSpectrum = async () => {
+        if (!window.ntmusicNta || typeof window.ntmusicNta.getSpectrumBuffer !== 'function') {
+            return;
+        }
+        try {
+            const status = await window.ntmusicNta.getStatus();
+            const buffer = await window.ntmusicNta.getSpectrumBuffer();
+            const bins = await window.ntmusicNta.getSpectrumLength();
+            if (!buffer || !bins) return;
+            spectrumSharedView = new Float32Array(buffer);
+            spectrumSharedBins = bins;
+            useSharedSpectrum = Boolean(status && status.shared);
+        } catch (_err) {
+            spectrumSharedView = null;
+            spectrumSharedBins = 0;
+            useSharedSpectrum = false;
+        }
+    };
+
     const toWsUrl = (url) => {
         try {
             const parsed = new URL(url);
@@ -194,9 +227,17 @@ let isDraggingProgress = false;
                 return;
             }
             if (payload.type === 'spectrum_data' && isPlaying) {
-                targetVisualizerData = payload.data || [];
-                if (currentVisualizerData.length === 0) {
-                    currentVisualizerData = Array(targetVisualizerData.length).fill(0);
+                const data = payload.data || [];
+                if (useSharedSpectrum && spectrumSharedView) {
+                    writeSpectrumToShared(data);
+                    if (currentVisualizerData.length === 0) {
+                        currentVisualizerData = Array(spectrumSharedView.length).fill(0);
+                    }
+                } else {
+                    targetVisualizerData = data;
+                    if (currentVisualizerData.length === 0) {
+                        currentVisualizerData = Array(targetVisualizerData.length).fill(0);
+                    }
                 }
                 return;
             }
@@ -668,18 +709,23 @@ class WebNowPlayingAdapter {
             }
             // --- End Bass Animation Logic ---
 
-            if (targetVisualizerData.length === 0) {
+            const sourceData = useSharedSpectrum && spectrumSharedView ? spectrumSharedView : targetVisualizerData;
+            if (!sourceData || sourceData.length === 0) {
                visualizerCtx.clearRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
                animationFrameId = requestAnimationFrame(draw);
                return;
            }
 
+           if (currentVisualizerData.length !== sourceData.length) {
+               currentVisualizerData = Array(sourceData.length).fill(0);
+           }
+
            // 使用缓动公式更新当前数据
-           for (let i = 0; i < targetVisualizerData.length; i++) {
+           for (let i = 0; i < sourceData.length; i++) {
                if (currentVisualizerData[i] === undefined) {
                    currentVisualizerData[i] = 0;
                }
-               currentVisualizerData[i] += (targetVisualizerData[i] - currentVisualizerData[i]) * easingFactor;
+               currentVisualizerData[i] += (sourceData[i] - currentVisualizerData[i]) * easingFactor;
            }
 
            // 使用平滑后的当前数据进行绘制
@@ -1569,6 +1615,7 @@ class WebNowPlayingAdapter {
         setupMediaSessionHandlers(); // Setup OS media controls
         updateModeButton();
         await initializeTheme();
+        await initNtaSpectrum();
         connectEngineSocket();
         
         // Setup phantom audio

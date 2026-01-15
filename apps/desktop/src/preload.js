@@ -29,6 +29,9 @@ const invokeChannels = [
     'music-capture-stop',
     'music-get-capture-devices',
     'music-get-engine-url',
+    'nta-get-spectrum-buffer',
+    'nta-get-spectrum-length',
+    'nta-get-status',
     'music-get-lyrics',
     'music-fetch-lyrics',
     'window-minimize',
@@ -73,4 +76,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.on('theme-updated', handler);
         return () => ipcRenderer.removeListener('theme-updated', handler);
     }
+});
+
+contextBridge.exposeInMainWorld('ntmusicNta', {
+    getSpectrumBuffer: () => ipcRenderer.invoke('nta-get-spectrum-buffer'),
+    getSpectrumLength: () => ipcRenderer.invoke('nta-get-spectrum-length'),
+    getStatus: () => ipcRenderer.invoke('nta-get-status')
 });

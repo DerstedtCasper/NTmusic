@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs-extra');
 const { spawn } = require('child_process');
+const { createNtaBridge } = require('./services/ntaBridge');
 
 const DEFAULT_ENGINE_PORT = 55554;
 const ENGINE_PORT = (() => {
@@ -30,6 +31,7 @@ const musicHandlers = require('./ipc/musicHandlers');
 let audioEngineProcess = null;
 let mainWindow = null;
 let openChildWindows = [];
+let ntaBridge = null;
 
 function getAppRoot() {
     return app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', '..');
@@ -157,9 +159,22 @@ function registerWindowControls() {
     });
 }
 
+function registerNtaBridgeIpc() {
+    if (!ntaBridge) return;
+    ipcMain.handle('nta-get-spectrum-buffer', () => ntaBridge.getSpectrumBuffer());
+    ipcMain.handle('nta-get-spectrum-length', () => ntaBridge.getSpectrumLength());
+    ipcMain.handle('nta-get-status', () => ntaBridge.getStatus());
+}
+
 async function bootstrap() {
     await ensureAppDataDirs();
     registerWindowControls();
+    ntaBridge = createNtaBridge({
+        appRoot: getAppRoot(),
+        resourcesPath: process.resourcesPath,
+        isPackaged: app.isPackaged
+    });
+    registerNtaBridgeIpc();
 
     musicHandlers.initialize({
         mainWindow,
