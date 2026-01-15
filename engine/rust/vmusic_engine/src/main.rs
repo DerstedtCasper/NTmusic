@@ -9,6 +9,7 @@ use axum::{
 use axum::extract::ws::{Message, WebSocket};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::{Consumer, HeapRb, Producer};
+use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,7 +21,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use symphonia::core::{
     audio::{AudioBufferRef, SampleBuffer},
@@ -56,7 +57,12 @@ struct PlaybackState {
     exclusive_mode: bool,
     eq_type: String,
     dither_enabled: bool,
+    dither_type: String,
+    dither_bits: u32,
     replaygain_enabled: bool,
+    resampler_mode: String,
+    resampler_quality: String,
+    soxr_available: bool,
     eq_enabled: bool,
     eq_bands: HashMap<String, f32>,
     target_samplerate: Option<u32>,
@@ -85,7 +91,12 @@ struct EngineState {
     eq_type: String,
     eq_bands: HashMap<String, f32>,
     dither_enabled: bool,
+    dither_type: String,
+    dither_bits: u32,
     replaygain_enabled: bool,
+    resampler_mode: String,
+    resampler_quality: String,
+    soxr_available: bool,
     target_samplerate: Option<u32>,
     stream_url: Option<String>,
     stream_status: String,
@@ -95,6 +106,7 @@ struct EngineState {
     buffer_max_ms: u32,
     underrun_count: u64,
     last_output_chunk: Vec<f32>,
+    dither_rng: u64,
 }
 
 #[derive(Deserialize)]
@@ -142,7 +154,11 @@ struct EqTypeRequest {
 #[derive(Deserialize)]
 struct OptimizeRequest {
     dither_enabled: Option<bool>,
+    dither_type: Option<String>,
+    dither_bits: Option<u32>,
     replaygain_enabled: Option<bool>,
+    resampler_mode: Option<String>,
+    resampler_quality: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -158,6 +174,41 @@ fn default_eq_bands() -> HashMap<String, f32> {
         map.insert(band.to_string(), 0.0);
     }
     map
+}
+
+fn initial_dither_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x1234_5678_9abc_def0)
+}
+
+fn soxr_candidate_names() -> &'static [&'static str] {
+    if cfg!(target_os = "windows") {
+        &["soxr.dll", "libsoxr.dll"]
+    } else if cfg!(target_os = "macos") {
+        &["libsoxr.dylib"]
+    } else {
+        &["libsoxr.so", "libsoxr.so.0"]
+    }
+}
+
+fn detect_soxr_available() -> bool {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = std::env::var("VMUSIC_SOXR_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+    if let Ok(dir) = std::env::var("VMUSIC_ASSET_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+    for dir in dirs {
+        for name in soxr_candidate_names() {
+            if dir.join(name).exists() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn initial_state() -> EngineState {
@@ -179,7 +230,12 @@ fn initial_state() -> EngineState {
         eq_type: "IIR".to_string(),
         eq_bands: default_eq_bands(),
         dither_enabled: true,
+        dither_type: "tpdf".to_string(),
+        dither_bits: 24,
         replaygain_enabled: true,
+        resampler_mode: "auto".to_string(),
+        resampler_quality: "hq".to_string(),
+        soxr_available: detect_soxr_available(),
         target_samplerate: None,
         stream_url: None,
         stream_status: "idle".to_string(),
@@ -189,6 +245,7 @@ fn initial_state() -> EngineState {
         buffer_max_ms: 5000,
         underrun_count: 0,
         last_output_chunk: Vec::new(),
+        dither_rng: initial_dither_seed(),
     }
 }
 
@@ -225,7 +282,12 @@ fn build_state_view(state: &EngineState) -> PlaybackState {
         exclusive_mode: state.exclusive_mode,
         eq_type: state.eq_type.clone(),
         dither_enabled: state.dither_enabled,
+        dither_type: state.dither_type.clone(),
+        dither_bits: state.dither_bits,
         replaygain_enabled: state.replaygain_enabled,
+        resampler_mode: state.resampler_mode.clone(),
+        resampler_quality: state.resampler_quality.clone(),
+        soxr_available: state.soxr_available,
         eq_enabled: state.eq_enabled,
         eq_bands: state.eq_bands.clone(),
         target_samplerate: state.target_samplerate,
@@ -479,6 +541,111 @@ fn decode_file(path: &str) -> Result<(Vec<f32>, u32, usize, f64)> {
     Ok((samples, sample_rate, channels, duration))
 }
 
+fn normalize_resampler_mode(value: &str) -> String {
+    let normalized = value.to_lowercase();
+    match normalized.as_str() {
+        "auto" | "rubato" | "soxr" => normalized,
+        _ => "auto".to_string(),
+    }
+}
+
+fn normalize_resampler_quality(value: &str) -> String {
+    let normalized = value.to_lowercase();
+    match normalized.as_str() {
+        "low" | "std" | "hq" | "uhq" => normalized,
+        _ => "hq".to_string(),
+    }
+}
+
+fn normalize_dither_bits(bits: u32) -> u32 {
+    match bits {
+        16 | 24 => bits,
+        _ => 24,
+    }
+}
+
+fn get_sinc_params(quality: &str, ratio: f64) -> SincInterpolationParameters {
+    let f_cutoff = if ratio < 1.0 { 0.90 } else { 0.95 };
+    match quality {
+        "low" => SincInterpolationParameters {
+            sinc_len: 64,
+            f_cutoff,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 64,
+            window: WindowFunction::Hann,
+        },
+        "std" => SincInterpolationParameters {
+            sinc_len: 128,
+            f_cutoff,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 128,
+            window: WindowFunction::Blackman,
+        },
+        "hq" => SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: WindowFunction::BlackmanHarris2,
+        },
+        _ => SincInterpolationParameters {
+            sinc_len: 512,
+            f_cutoff,
+            interpolation: SincInterpolationType::Cubic,
+            oversampling_factor: 512,
+            window: WindowFunction::BlackmanHarris2,
+        },
+    }
+}
+
+fn resample_audio(
+    data: &[f32],
+    channels: usize,
+    from_rate: u32,
+    to_rate: u32,
+    quality: &str,
+) -> Result<Vec<f32>> {
+    if data.is_empty() || channels == 0 || from_rate == 0 || to_rate == 0 {
+        return Ok(data.to_vec());
+    }
+    if from_rate == to_rate {
+        return Ok(data.to_vec());
+    }
+
+    let frames = data.len() / channels;
+    if frames == 0 {
+        return Ok(Vec::new());
+    }
+
+    let ratio = to_rate as f64 / from_rate as f64;
+    let params = get_sinc_params(quality, ratio);
+
+    let mut waves_in: Vec<Vec<f64>> = vec![Vec::with_capacity(frames); channels];
+    for frame in data.chunks_exact(channels) {
+        for (ch, &sample) in frame.iter().enumerate() {
+            waves_in[ch].push(sample as f64);
+        }
+    }
+
+    let mut resampler = SincFixedIn::new(ratio, 2.0, params, frames, channels)
+        .map_err(|err| anyhow!("resampler init failed: {}", err))?;
+    let waves_out = resampler
+        .process(&waves_in, None)
+        .map_err(|err| anyhow!("resampler process failed: {}", err))?;
+
+    let out_frames = waves_out.get(0).map_or(0, |v| v.len());
+    let mut output = vec![0.0f32; out_frames * channels];
+    for i in 0..out_frames {
+        for (ch, channel_data) in waves_out.iter().enumerate() {
+            if let Some(sample) = channel_data.get(i) {
+                output[i * channels + ch] = *sample as f32;
+            }
+        }
+    }
+
+    Ok(output)
+}
+
 fn compute_spectrum(samples: &[f32], sample_rate: u32, fft_size: usize, bins: usize) -> Vec<f32> {
     if samples.is_empty() || sample_rate == 0 {
         return vec![0.0; bins];
@@ -522,6 +689,41 @@ fn compute_spectrum(samples: &[f32], sample_rate: u32, fft_size: usize, bins: us
     }
     out
 }
+
+fn next_uniform(seed: &mut u64) -> f32 {
+    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    let value = (*seed >> 32) as u32;
+    (value as f32) / (u32::MAX as f32)
+}
+
+fn apply_tpdf_dither(samples: &mut [f32], bits: u32, seed: &mut u64) {
+    let effective_bits = bits.clamp(8, 32);
+    let denom = 1u64 << effective_bits.saturating_sub(1);
+    let lsb = 1.0 / denom as f32;
+    for sample in samples.iter_mut() {
+        let noise = (next_uniform(seed) - next_uniform(seed)) * lsb;
+        *sample = (*sample + noise).clamp(-1.0, 1.0);
+    }
+}
+
+fn apply_dither_if_needed(state: &Arc<Mutex<EngineState>>, data: &mut [f32], target_bits: u32) {
+    let (enabled, dither_type, bits, mut seed) = {
+        let guard = state.lock().unwrap();
+        (
+            guard.dither_enabled,
+            guard.dither_type.clone(),
+            guard.dither_bits,
+            guard.dither_rng,
+        )
+    };
+    if !enabled || dither_type != "tpdf" {
+        return;
+    }
+    let effective_bits = normalize_dither_bits(bits).min(target_bits);
+    apply_tpdf_dither(data, effective_bits, &mut seed);
+    let mut guard = state.lock().unwrap();
+    guard.dither_rng = seed;
+}
 fn ensure_output_stream(shared: &SharedState) -> Result<()> {
     let mut guard = shared.output_stream.lock().unwrap();
     if guard.is_some() {
@@ -564,6 +766,7 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
             move |data: &mut [i16], _| {
                 let mut temp = vec![0.0f32; data.len()];
                 fill_output_buffer(&state, &consumer, &mut temp);
+                apply_dither_if_needed(&state, &mut temp, 16);
                 for (dst, src) in data.iter_mut().zip(temp.iter()) {
                     *dst = cpal::Sample::from::<f32>(src);
                 }
@@ -576,6 +779,7 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
             move |data: &mut [u16], _| {
                 let mut temp = vec![0.0f32; data.len()];
                 fill_output_buffer(&state, &consumer, &mut temp);
+                apply_dither_if_needed(&state, &mut temp, 16);
                 for (dst, src) in data.iter_mut().zip(temp.iter()) {
                     *dst = cpal::Sample::from::<f32>(src);
                 }
@@ -735,7 +939,7 @@ async fn load_handler(State(shared): State<SharedState>, Json(req): Json<LoadReq
     }
     stop_stream(&shared);
     let decode = decode_file(&req.path);
-    let (data, sample_rate, channels, duration) = match decode {
+    let (data, sample_rate, channels, _duration) = match decode {
         Ok(result) => result,
         Err(err) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
@@ -745,10 +949,58 @@ async fn load_handler(State(shared): State<SharedState>, Json(req): Json<LoadReq
         }
     };
 
+    let soxr_available = detect_soxr_available();
+    let (target_samplerate, resampler_mode, resampler_quality) = {
+        let mut state = shared.inner.lock().unwrap();
+        state.soxr_available = soxr_available;
+        (
+            state.target_samplerate,
+            state.resampler_mode.clone(),
+            state.resampler_quality.clone(),
+        )
+    };
+
+    let mut final_data = data;
+    let mut final_sample_rate = sample_rate;
+    if let Some(target) = target_samplerate {
+        if target > 0 && target != sample_rate {
+            let mode = normalize_resampler_mode(&resampler_mode);
+            let quality = normalize_resampler_quality(&resampler_quality);
+            if mode == "soxr" {
+                let message = if soxr_available {
+                    "soxr selected but not available in engine yet"
+                } else {
+                    "soxr resampler not available"
+                };
+                return (StatusCode::BAD_REQUEST, Json(json!({
+                    "status": "error",
+                    "message": message
+                })));
+            }
+            match resample_audio(&final_data, channels, sample_rate, target, &quality) {
+                Ok(resampled) => {
+                    final_data = resampled;
+                    final_sample_rate = target;
+                }
+                Err(err) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                        "status": "error",
+                        "message": format!("resample failed: {}", err)
+                    })));
+                }
+            }
+        }
+    }
+    let duration = if final_sample_rate > 0 && channels > 0 {
+        (final_data.len() / channels) as f64 / final_sample_rate as f64
+    } else {
+        0.0
+    };
+
     {
         let mut state = shared.inner.lock().unwrap();
-        state.data = data;
-        state.sample_rate = sample_rate;
+        state.data = final_data;
+        state.sample_rate = final_sample_rate;
         state.channels = channels;
         state.position = 0;
         state.duration = duration;
@@ -890,12 +1142,38 @@ async fn set_eq_type_handler(State(shared): State<SharedState>, Json(req): Json<
 
 async fn configure_opt_handler(State(shared): State<SharedState>, Json(req): Json<OptimizeRequest>) -> impl IntoResponse {
     let mut state = shared.inner.lock().unwrap();
+    if let Some(value) = req.dither_type {
+        let normalized = match value.to_lowercase().as_str() {
+            "off" => "off".to_string(),
+            "tpdf" => "tpdf".to_string(),
+            _ => "tpdf".to_string(),
+        };
+        state.dither_type = normalized.clone();
+        if normalized == "off" {
+            state.dither_enabled = false;
+        }
+    }
+    if let Some(bits) = req.dither_bits {
+        state.dither_bits = normalize_dither_bits(bits);
+    }
     if let Some(val) = req.dither_enabled {
         state.dither_enabled = val;
+        if !val {
+            state.dither_type = "off".to_string();
+        } else if state.dither_type == "off" {
+            state.dither_type = "tpdf".to_string();
+        }
     }
     if let Some(val) = req.replaygain_enabled {
         state.replaygain_enabled = val;
     }
+    if let Some(value) = req.resampler_mode {
+        state.resampler_mode = normalize_resampler_mode(&value);
+    }
+    if let Some(value) = req.resampler_quality {
+        state.resampler_quality = normalize_resampler_quality(&value);
+    }
+    state.soxr_available = detect_soxr_available();
     Json(json!({ "status": "success", "state": build_state_view(&state) }))
 }
 async fn load_stream_handler(State(shared): State<SharedState>, Json(req): Json<StreamRequest>) -> impl IntoResponse {

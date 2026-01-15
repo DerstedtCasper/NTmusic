@@ -17,3 +17,4 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 rustfft = "6.2"
 symphonia = { version = "0.5", features = ["aac", "flac", "mp3", "vorbis", "wav"] }
 uuid = { version = "1.10", features = ["v4"] }
+rubato = "0.14.1"
