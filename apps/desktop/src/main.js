@@ -101,6 +101,11 @@ function startAudioEngine() {
             env.NTMUSIC_SPECTRUM_SHM = spectrumSpec.path;
             env.NTMUSIC_SPECTRUM_BINS = String(spectrumSpec.bins || 0);
         }
+        const controlSpec = ntaBridge ? ntaBridge.getControlSpec() : null;
+        if (controlSpec && controlSpec.path) {
+            env.NTMUSIC_CONTROL_SHM = controlSpec.path;
+            env.NTMUSIC_CONTROL_CAPACITY = String(controlSpec.capacity || 0);
+        }
 
         audioEngineProcess = spawn(enginePath, [], { cwd: engineDir, env });
 
@@ -174,6 +179,7 @@ function registerNtaBridgeIpc() {
     ipcMain.handle('nta-get-spectrum-spec', () => ntaBridge.getSpectrumSpec());
     ipcMain.handle('nta-get-spectrum-length', () => ntaBridge.getSpectrumLength());
     ipcMain.handle('nta-get-status', () => ntaBridge.getStatus());
+    ipcMain.handle('nta-get-control-spec', () => ntaBridge.getControlSpec());
 }
 
 async function bootstrap() {

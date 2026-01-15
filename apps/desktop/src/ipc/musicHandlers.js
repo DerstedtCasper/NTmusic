@@ -317,6 +317,10 @@ function initialize(options) {
         ipcMain.handle('music-get-engine-url', () => {
             return { status: 'success', url: getAudioEngineUrl() };
         });
+
+        ipcMain.handle('nta-set-spectrum-ws', (event, { enabled }) => {
+            return audioEngineApi('/spectrum/ws', 'POST', { enabled: Boolean(enabled) });
+        });
  
          ipcMain.on('open-music-folder', async (event) => {
             const result = await dialog.showOpenDialog(mainWindow, {

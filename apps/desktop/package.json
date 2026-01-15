@@ -2,6 +2,7 @@
   "name": "ntmusic-desktop",
   "version": "0.1.0",
   "description": "NTmusic Desktop (prototype)",
+  "author": "NTmusic",
   "main": "src/main.js",
   "private": true,
   "scripts": {
@@ -39,7 +40,7 @@
         ]
       },
       {
-        "from": "../../engine/rust/ntmusic_core/dist/ntmusic_core.node",
+        "from": "../../engine/rust/ntmusic_core/target/release/ntmusic_core.node",
         "to": "native/ntmusic_core.node"
       }
     ],

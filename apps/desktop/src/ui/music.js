@@ -78,6 +78,36 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentLyrics = [];
     let currentLyricIndex = -1;
     let lyricOffset = -0.05; // In seconds. Negative value makes lyrics appear earlier to compensate for UI lag.
+
+    const CONTROL_COMMANDS = {
+        PLAY: 1,
+        PAUSE: 2,
+        STOP: 3,
+        SEEK: 4,
+        VOLUME: 5
+    };
+
+    const trySendControl = async (cmd, value = 0) => {
+        if (!window.ntmusicNta || typeof window.ntmusicNta.sendControl !== 'function') {
+            return false;
+        }
+        try {
+            return await window.ntmusicNta.sendControl(cmd, value);
+        } catch (_err) {
+            return false;
+        }
+    };
+
+    const setSpectrumWs = async (enabled) => {
+        if (!window.ntmusicNta || typeof window.ntmusicNta.setSpectrumWs !== 'function') {
+            return;
+        }
+        try {
+            await window.ntmusicNta.setSpectrumWs(enabled);
+        } catch (_err) {
+            // ignore
+        }
+    };
     let lyricSpeedFactor = 1.0; // Should be 1.0 for correctly timed LRC files.
     let lastKnownCurrentTime = 0;
     let lastStateUpdateTime = 0;
@@ -174,10 +204,14 @@ let isDraggingProgress = false;
             const status = await window.ntmusicNta.getStatus();
             const buffer = await window.ntmusicNta.getSpectrumBuffer();
             const bins = await window.ntmusicNta.getSpectrumLength();
-            if (!buffer || !bins) return;
+            if (!buffer || !bins) {
+                await setSpectrumWs(true);
+                return;
+            }
             spectrumSharedView = new Float32Array(buffer);
             spectrumSharedBins = bins;
             useSharedSpectrum = Boolean(status && status.shared && spectrumSharedView);
+            await setSpectrumWs(!useSharedSpectrum);
             if (spectrumSharedView && currentVisualizerData.length === 0) {
                 currentVisualizerData = Array(spectrumSharedView.length).fill(0);
             }
@@ -185,6 +219,7 @@ let isDraggingProgress = false;
             spectrumSharedView = null;
             spectrumSharedBins = 0;
             useSharedSpectrum = false;
+            await setSpectrumWs(true);
         }
     };
 
@@ -484,25 +519,33 @@ class WebNowPlayingAdapter {
 
     const playTrack = async () => {
         if (currentInputMode === 'file' && playlist.length === 0) return;
-        const result = await window.electron.invoke('music-play');
-        if (result.status === 'success') {
-            isPlaying = true;
-            playPauseBtn.classList.add('is-playing');
-            phantomAudio.play().catch(e => console.error("Phantom audio play failed:", e));
-            startStatePolling();
-            if (wnpAdapter) wnpAdapter.sendUpdate();
+        const controlOk = await trySendControl(CONTROL_COMMANDS.PLAY);
+        if (!controlOk) {
+            const result = await window.electron.invoke('music-play');
+            if (result.status !== 'success') {
+                return;
+            }
         }
+        isPlaying = true;
+        playPauseBtn.classList.add('is-playing');
+        phantomAudio.play().catch(e => console.error("Phantom audio play failed:", e));
+        startStatePolling();
+        if (wnpAdapter) wnpAdapter.sendUpdate();
     };
 
     const pauseTrack = async () => {
-        const result = await window.electron.invoke('music-pause');
-        if (result.status === 'success') {
-            isPlaying = false;
-            playPauseBtn.classList.remove('is-playing');
-            phantomAudio.pause();
-            stopStatePolling();
-            if (wnpAdapter) wnpAdapter.sendUpdate();
+        const controlOk = await trySendControl(CONTROL_COMMANDS.PAUSE);
+        if (!controlOk) {
+            const result = await window.electron.invoke('music-pause');
+            if (result.status !== 'success') {
+                return;
+            }
         }
+        isPlaying = false;
+        playPauseBtn.classList.remove('is-playing');
+        phantomAudio.pause();
+        stopStatePolling();
+        if (wnpAdapter) wnpAdapter.sendUpdate();
     };
 
     const prevTrack = () => {
@@ -857,7 +900,10 @@ class WebNowPlayingAdapter {
             currentTimeEl.textContent = formatTime(newTime);
 
             if (shouldSeek) {
-                await window.electron.invoke('music-seek', newTime);
+                const controlOk = await trySendControl(CONTROL_COMMANDS.SEEK, newTime);
+                if (!controlOk) {
+                    await window.electron.invoke('music-seek', newTime);
+                }
                 // If still playing after drag, resume polling
                 if (isPlaying) {
                     startStatePolling();
@@ -905,7 +951,10 @@ class WebNowPlayingAdapter {
         const newVolume = parseFloat(e.target.value);
         updateVolumeSliderBackground(newVolume);
         if (window.electron) {
-            await window.electron.invoke('music-set-volume', newVolume);
+            const controlOk = await trySendControl(CONTROL_COMMANDS.VOLUME, newVolume);
+            if (!controlOk) {
+                await window.electron.invoke('music-set-volume', newVolume);
+            }
         }
     });
     volumeBtn.addEventListener('click', () => {
@@ -1208,13 +1257,19 @@ class WebNowPlayingAdapter {
       trackBitrate.textContent = '';
       const result = await window.electron.invoke('music-load-stream', { url });
       if (result.status === 'success') {
-          await window.electron.invoke('music-play');
+          const controlOk = await trySendControl(CONTROL_COMMANDS.PLAY);
+          if (!controlOk) {
+              await window.electron.invoke('music-play');
+          }
       }
   };
 
   const stopStream = async () => {
       if (!window.electron) return;
-      await window.electron.invoke('music-stop');
+      const controlOk = await trySendControl(CONTROL_COMMANDS.STOP);
+      if (!controlOk) {
+          await window.electron.invoke('music-stop');
+      }
   };
 
   const startCapture = async () => {
@@ -1226,7 +1281,10 @@ class WebNowPlayingAdapter {
       const device_id = captureDeviceSelect ? captureDeviceSelect.value : 'default';
       const result = await window.electron.invoke('music-capture-start', { device_id });
       if (result.status === 'success') {
-          await window.electron.invoke('music-play');
+          const controlOk = await trySendControl(CONTROL_COMMANDS.PLAY);
+          if (!controlOk) {
+              await window.electron.invoke('music-play');
+          }
       }
   };
 
@@ -1239,7 +1297,10 @@ class WebNowPlayingAdapter {
       if (!inputSourceSelect) return;
       inputSourceSelect.addEventListener('change', async () => {
           if (currentInputMode !== inputSourceSelect.value) {
-              await window.electron.invoke('music-stop');
+              const controlOk = await trySendControl(CONTROL_COMMANDS.STOP);
+              if (!controlOk) {
+                  await window.electron.invoke('music-stop');
+              }
           }
           setInputMode(inputSourceSelect.value);
       });

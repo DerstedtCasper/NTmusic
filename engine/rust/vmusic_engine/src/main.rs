@@ -24,7 +24,10 @@ use std::{
     os::raw::{c_char, c_void},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -50,6 +53,7 @@ struct SharedState {
     stream_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     spectrum_shared: Option<Arc<Mutex<SpectrumShared>>>,
     spectrum_bins: usize,
+    control_shared: Option<Arc<Mutex<ControlShared>>>,
 }
 
 struct OutputStreamHolder(Option<cpal::Stream>);
@@ -63,9 +67,23 @@ struct SpectrumShared {
     bins: usize,
 }
 
+struct ControlShared {
+    mmap: MmapMut,
+    capacity: usize,
+}
+
 const DEFAULT_SPECTRUM_BINS: usize = 48;
 const SPECTRUM_FFT_SIZE: usize = 2048;
 const SPECTRUM_UPDATE_INTERVAL_MS: u64 = 50;
+const SPECTRUM_HEADER_BYTES: usize = std::mem::size_of::<u32>();
+const CONTROL_HEADER_BYTES: usize = 16;
+const CONTROL_CMD_BYTES: usize = 16;
+
+const CONTROL_CMD_PLAY: u32 = 1;
+const CONTROL_CMD_PAUSE: u32 = 2;
+const CONTROL_CMD_STOP: u32 = 3;
+const CONTROL_CMD_SEEK: u32 = 4;
+const CONTROL_CMD_VOLUME: u32 = 5;
 
 struct SpectrumAnalyzer {
     fft_size: usize,
@@ -174,6 +192,7 @@ struct PlaybackState {
     stream_status: String,
     buffered_ms: f64,
     underruns: u64,
+    spectrum_ws_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -206,11 +225,11 @@ struct EngineState {
     stream_status: String,
     stream_error: Option<String>,
     buffered_frames: usize,
-    buffer_target_ms: u32,
     buffer_max_ms: u32,
     underrun_count: u64,
     last_output_chunk: Vec<f32>,
     dither_rng: u64,
+    spectrum_ws_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -237,6 +256,11 @@ struct VolumeRequest {
 struct ConfigureOutputRequest {
     device_id: Option<usize>,
     exclusive: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct SpectrumWsRequest {
+    enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -295,12 +319,21 @@ fn parse_spectrum_bins() -> usize {
         .unwrap_or(DEFAULT_SPECTRUM_BINS)
 }
 
+fn parse_control_capacity() -> usize {
+    std::env::var("NTMUSIC_CONTROL_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(64)
+}
+
 fn init_spectrum_shared(bins: usize) -> Option<Arc<Mutex<SpectrumShared>>> {
     let path = match std::env::var("NTMUSIC_SPECTRUM_SHM") {
         Ok(value) if !value.is_empty() => value,
         _ => return None,
     };
-    let byte_len = bins.saturating_mul(std::mem::size_of::<f32>());
+    let data_len = bins.saturating_mul(std::mem::size_of::<f32>());
+    let byte_len = SPECTRUM_HEADER_BYTES.saturating_add(data_len);
     let file = match OpenOptions::new().read(true).write(true).create(true).open(&path) {
         Ok(file) => file,
         Err(err) => {
@@ -324,6 +357,94 @@ fn init_spectrum_shared(bins: usize) -> Option<Arc<Mutex<SpectrumShared>>> {
     Some(Arc::new(Mutex::new(SpectrumShared { mmap, bins })))
 }
 
+fn init_control_shared(capacity: usize) -> Option<Arc<Mutex<ControlShared>>> {
+    let path = match std::env::var("NTMUSIC_CONTROL_SHM") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return None,
+    };
+    let byte_len = CONTROL_HEADER_BYTES.saturating_add(capacity.saturating_mul(CONTROL_CMD_BYTES));
+    let file = match OpenOptions::new().read(true).write(true).create(true).open(&path) {
+        Ok(file) => file,
+        Err(err) => {
+            error!("control shm open failed: {}", err);
+            return None;
+        }
+    };
+    if let Err(err) = file.set_len(byte_len as u64) {
+        error!("control shm resize failed: {}", err);
+        return None;
+    }
+    let mut mmap = unsafe {
+        match MmapMut::map_mut(&file) {
+            Ok(map) => map,
+            Err(err) => {
+                error!("control shm map failed: {}", err);
+                return None;
+            }
+        }
+    };
+    let header_ptr = mmap.as_mut_ptr();
+    let write_idx = unsafe { &*(header_ptr as *const AtomicU32) };
+    let read_idx = unsafe { &*(header_ptr.add(4) as *const AtomicU32) };
+    write_idx.store(0, Ordering::Release);
+    read_idx.store(0, Ordering::Release);
+    unsafe {
+        *(header_ptr.add(8) as *mut u32) = capacity as u32;
+        *(header_ptr.add(12) as *mut u32) = 0;
+    }
+    Some(Arc::new(Mutex::new(ControlShared { mmap, capacity })))
+}
+
+fn drain_control_commands(state: &mut EngineState, control: &ControlShared) {
+    let header_ptr = control.mmap.as_ptr() as *const u8;
+    let write_idx = unsafe { &*(header_ptr as *const AtomicU32) };
+    let read_idx = unsafe { &*(header_ptr.add(4) as *const AtomicU32) };
+    let capacity = control.capacity.max(1) as u32;
+
+    let mut read = read_idx.load(Ordering::Acquire);
+    let write = write_idx.load(Ordering::Acquire);
+    if read == write {
+        return;
+    }
+    let mut processed = 0u32;
+    while read != write && processed < capacity {
+        let cmd_offset = CONTROL_HEADER_BYTES + (read as usize * CONTROL_CMD_BYTES);
+        let cmd_ptr = unsafe { header_ptr.add(cmd_offset) };
+        let cmd = unsafe { *(cmd_ptr as *const u32) };
+        let value = unsafe { *(cmd_ptr.add(4) as *const f32) };
+        match cmd {
+            CONTROL_CMD_PLAY => {
+                state.is_playing = true;
+                state.is_paused = false;
+            }
+            CONTROL_CMD_PAUSE => {
+                state.is_paused = true;
+            }
+            CONTROL_CMD_STOP => {
+                state.is_playing = false;
+                state.is_paused = false;
+                if state.mode == "file" {
+                    state.position = 0;
+                }
+            }
+            CONTROL_CMD_SEEK => {
+                if state.mode == "file" && state.sample_rate > 0 {
+                    let new_pos = (value.max(0.0) * state.sample_rate as f32) as usize;
+                    let max_pos = state.data.len() / state.channels.max(1);
+                    state.position = new_pos.min(max_pos);
+                }
+            }
+            CONTROL_CMD_VOLUME => {
+                state.volume = value.clamp(0.0, 1.0);
+            }
+            _ => {}
+        }
+        read = (read + 1) % capacity;
+        processed += 1;
+    }
+    read_idx.store(read, Ordering::Release);
+}
+
 fn write_spectrum_shared(shared: &Option<Arc<Mutex<SpectrumShared>>>, spectrum: &[f32]) {
     let Some(shared) = shared else {
         return;
@@ -332,15 +453,18 @@ fn write_spectrum_shared(shared: &Option<Arc<Mutex<SpectrumShared>>>, spectrum: 
         Ok(guard) => guard,
         Err(_) => return,
     };
-    let available_bins = guard.mmap.len() / std::mem::size_of::<f32>();
+    let data_len = guard.mmap.len().saturating_sub(SPECTRUM_HEADER_BYTES);
+    let available_bins = data_len / std::mem::size_of::<f32>();
     let bins = guard.bins.min(available_bins);
     if bins == 0 {
         return;
     }
     let len = bins.min(spectrum.len());
-    let dst = unsafe {
-        std::slice::from_raw_parts_mut(guard.mmap.as_mut_ptr() as *mut f32, bins)
-    };
+    let seq = unsafe { &*(guard.mmap.as_ptr() as *const AtomicU32) };
+    let data_ptr = unsafe { guard.mmap.as_mut_ptr().add(SPECTRUM_HEADER_BYTES) as *mut f32 };
+    let dst = unsafe { std::slice::from_raw_parts_mut(data_ptr, bins) };
+    let start_seq = seq.load(Ordering::Relaxed).wrapping_add(1);
+    seq.store(start_seq, Ordering::Release);
     if len > 0 {
         dst[..len].copy_from_slice(&spectrum[..len]);
     }
@@ -349,6 +473,7 @@ fn write_spectrum_shared(shared: &Option<Arc<Mutex<SpectrumShared>>>, spectrum: 
             *value = 0.0;
         }
     }
+    seq.store(start_seq.wrapping_add(1), Ordering::Release);
 }
 
 type SoxrHandle = *mut c_void;
@@ -520,11 +645,11 @@ fn initial_state() -> EngineState {
         stream_status: "idle".to_string(),
         stream_error: None,
         buffered_frames: 0,
-        buffer_target_ms: 300,
         buffer_max_ms: 5000,
         underrun_count: 0,
         last_output_chunk: vec![0.0; SPECTRUM_FFT_SIZE],
         dither_rng: initial_dither_seed(),
+        spectrum_ws_enabled: true,
     }
 }
 
@@ -574,6 +699,7 @@ fn build_state_view(state: &EngineState) -> PlaybackState {
         stream_status: state.stream_status.clone(),
         buffered_ms,
         underruns: state.underrun_count,
+        spectrum_ws_enabled: state.spectrum_ws_enabled,
     }
 }
 fn send_state(shared: &SharedState) {
@@ -1017,6 +1143,68 @@ fn resample_audio_soxr(
     Ok(output)
 }
 
+fn resample_for_output(shared: &SharedState, target_rate: u32) -> Result<()> {
+    let (mode, channels, sample_rate, resampler_mode, resampler_quality, soxr_available, data, position) = {
+        let mut state = shared.inner.lock().unwrap();
+        if state.mode != "file" || state.data.is_empty() {
+            return Ok(());
+        }
+        if state.sample_rate == target_rate || target_rate == 0 {
+            return Ok(());
+        }
+        (
+            state.mode.clone(),
+            state.channels,
+            state.sample_rate,
+            state.resampler_mode.clone(),
+            state.resampler_quality.clone(),
+            state.soxr_available,
+            std::mem::take(&mut state.data),
+            state.position,
+        )
+    };
+
+    if mode != "file" {
+        return Ok(());
+    }
+
+    let quality = normalize_resampler_quality(&resampler_quality);
+    let prefer_soxr = resampler_mode == "soxr" || (resampler_mode == "auto" && soxr_available);
+    let resampled = if prefer_soxr {
+        match resample_audio_soxr(&data, channels, sample_rate, target_rate) {
+            Ok(out) => out,
+            Err(err) => {
+                if resampler_mode == "auto" {
+                    error!("soxr resample failed, falling back to rubato: {}", err);
+                    resample_audio(&data, channels, sample_rate, target_rate, &quality)?
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    } else {
+        resample_audio(&data, channels, sample_rate, target_rate, &quality)?
+    };
+
+    let duration = if target_rate > 0 && channels > 0 {
+        (resampled.len() / channels) as f64 / target_rate as f64
+    } else {
+        0.0
+    };
+    let scaled_pos = if sample_rate > 0 {
+        ((position as f64) * target_rate as f64 / sample_rate as f64) as usize
+    } else {
+        0
+    };
+
+    let mut state = shared.inner.lock().unwrap();
+    state.data = resampled;
+    state.sample_rate = target_rate;
+    state.duration = duration;
+    state.position = scaled_pos.min(state.data.len() / state.channels.max(1));
+    Ok(())
+}
+
 fn next_uniform(seed: &mut u64) -> f32 {
     *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     let value = (*seed >> 32) as u32;
@@ -1066,14 +1254,46 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
     };
 
     let default_config = device.default_output_config()?;
-    let sample_format = default_config.sample_format();
+    let mut sample_format = default_config.sample_format();
     let mut config = default_config.config();
-    let target_rate = state_snapshot.target_samplerate.unwrap_or(state_snapshot.sample_rate);
-    config.sample_rate = cpal::SampleRate(target_rate.max(8000));
-    config.channels = state_snapshot.channels as u16;
+    let target_rate = state_snapshot
+        .target_samplerate
+        .unwrap_or(state_snapshot.sample_rate)
+        .max(8000);
+    let target_channels = state_snapshot.channels.max(1) as u16;
+    config.channels = target_channels;
+
+    let mut matched = None;
+    if let Ok(supported) = device.supported_output_configs() {
+        for range in supported {
+            if range.channels() != target_channels {
+                continue;
+            }
+            let min_rate = range.min_sample_rate().0;
+            let max_rate = range.max_sample_rate().0;
+            if target_rate >= min_rate && target_rate <= max_rate {
+                matched = Some(range.with_sample_rate(cpal::SampleRate(target_rate)));
+                break;
+            }
+        }
+    }
+
+    if let Some(cfg) = matched {
+        sample_format = cfg.sample_format();
+        config = cfg.config();
+    } else {
+        let fallback_rate = default_config.sample_rate().0.max(8000);
+        if fallback_rate != target_rate {
+            if let Err(err) = resample_for_output(shared, fallback_rate) {
+                error!("resample for output failed: {}", err);
+            }
+        }
+        config.sample_rate = cpal::SampleRate(fallback_rate);
+    }
 
     let state = shared.inner.clone();
     let consumer = shared.consumer.clone();
+    let control_shared = shared.control_shared.clone();
 
     let err_fn = |err| {
         error!("stream error: {}", err);
@@ -1083,7 +1303,7 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
         cpal::SampleFormat::F32 => device.build_output_stream(
             &config,
             move |data: &mut [f32], _| {
-                fill_output_buffer(&state, &consumer, data);
+                fill_output_buffer(&state, &consumer, &control_shared, data);
             },
             err_fn,
             None,
@@ -1092,7 +1312,7 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
             &config,
             move |data: &mut [i16], _| {
                 let mut temp = vec![0.0f32; data.len()];
-                fill_output_buffer(&state, &consumer, &mut temp);
+                fill_output_buffer(&state, &consumer, &control_shared, &mut temp);
                 apply_dither_if_needed(&state, &mut temp, 16);
                 for (dst, src) in data.iter_mut().zip(temp.iter()) {
                     *dst = cpal::Sample::from_sample(*src);
@@ -1105,7 +1325,7 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
             &config,
             move |data: &mut [u16], _| {
                 let mut temp = vec![0.0f32; data.len()];
-                fill_output_buffer(&state, &consumer, &mut temp);
+                fill_output_buffer(&state, &consumer, &control_shared, &mut temp);
                 apply_dither_if_needed(&state, &mut temp, 16);
                 for (dst, src) in data.iter_mut().zip(temp.iter()) {
                     *dst = cpal::Sample::from_sample(*src);
@@ -1122,9 +1342,19 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
     Ok(())
 }
 
-fn fill_output_buffer(state: &Arc<Mutex<EngineState>>, consumer: &Arc<Mutex<HeapCons<f32>>>, data: &mut [f32]) {
+fn fill_output_buffer(
+    state: &Arc<Mutex<EngineState>>,
+    consumer: &Arc<Mutex<HeapCons<f32>>>,
+    control_shared: &Option<Arc<Mutex<ControlShared>>>,
+    data: &mut [f32],
+) {
     let frames = data.len();
     let mut local = state.lock().unwrap();
+    if let Some(control) = control_shared {
+        if let Ok(guard) = control.try_lock() {
+            drain_control_commands(&mut local, &guard);
+        }
+    }
     if !local.is_playing || local.is_paused {
         for sample in data.iter_mut() {
             *sample = 0.0;
@@ -1180,9 +1410,22 @@ fn fill_output_buffer(state: &Arc<Mutex<EngineState>>, consumer: &Arc<Mutex<Heap
     if local.last_output_chunk.len() != SPECTRUM_FFT_SIZE {
         local.last_output_chunk.resize(SPECTRUM_FFT_SIZE, 0.0);
     }
-    let copy_len = data.len().min(SPECTRUM_FFT_SIZE);
+    let channels = local.channels.max(1) as usize;
+    let frames = data.len() / channels;
+    let copy_len = frames.min(SPECTRUM_FFT_SIZE);
     if copy_len > 0 {
-        local.last_output_chunk[..copy_len].copy_from_slice(&data[..copy_len]);
+        if channels == 1 {
+            local.last_output_chunk[..copy_len].copy_from_slice(&data[..copy_len]);
+        } else {
+            for frame in 0..copy_len {
+                let mut sum = 0.0f32;
+                let base = frame * channels;
+                for ch in 0..channels {
+                    sum += data[base + ch];
+                }
+                local.last_output_chunk[frame] = sum / channels as f32;
+            }
+        }
     }
     if copy_len < SPECTRUM_FFT_SIZE {
         for value in &mut local.last_output_chunk[copy_len..] {
@@ -1616,6 +1859,16 @@ async fn capture_stop_handler(State(shared): State<SharedState>) -> impl IntoRes
     Json(json!({ "status": "success", "state": build_state_view(&state) }))
 }
 
+async fn spectrum_ws_handler(State(shared): State<SharedState>, Json(req): Json<SpectrumWsRequest>) -> impl IntoResponse {
+    {
+        let mut state = shared.inner.lock().unwrap();
+        state.spectrum_ws_enabled = req.enabled;
+    }
+    send_state(&shared);
+    let state = shared.inner.lock().unwrap();
+    Json(json!({ "status": "success", "state": build_state_view(&state) }))
+}
+
 async fn capture_devices_handler() -> impl IntoResponse {
     if cfg!(target_os = "windows") {
         Json(json!({
@@ -1660,9 +1913,8 @@ fn start_background_tasks(shared: SharedState) {
     tokio::spawn(async move {
         let mut analyzer = SpectrumAnalyzer::new(SPECTRUM_FFT_SIZE, spectrum_bins);
         let mut sample_buffer = vec![0.0f32; SPECTRUM_FFT_SIZE];
-        let use_ws = spectrum_shared.is_none();
         loop {
-            let sample_rate = {
+            let (sample_rate, ws_enabled) = {
                 let state = state_clone.inner.lock().unwrap();
                 let copy_len = state.last_output_chunk.len().min(SPECTRUM_FFT_SIZE);
                 if copy_len > 0 {
@@ -1673,11 +1925,11 @@ fn start_background_tasks(shared: SharedState) {
                         *value = 0.0;
                     }
                 }
-                state.sample_rate
+                (state.sample_rate, state.spectrum_ws_enabled)
             };
             let spectrum = analyzer.compute(&sample_buffer, sample_rate);
             write_spectrum_shared(&spectrum_shared, spectrum);
-            if use_ws {
+            if ws_enabled {
                 let payload = json!({ "type": "spectrum_data", "data": spectrum });
                 let _ = state_clone.tx.send(payload.to_string());
             }
@@ -1699,6 +1951,8 @@ async fn main() -> Result<()> {
     let (tx, _rx) = broadcast::channel(128);
     let spectrum_bins = parse_spectrum_bins();
     let spectrum_shared = init_spectrum_shared(spectrum_bins);
+    let control_capacity = parse_control_capacity();
+    let control_shared = init_control_shared(control_capacity);
 
     let shared = SharedState {
         inner: Arc::new(Mutex::new(initial_state())),
@@ -1710,6 +1964,7 @@ async fn main() -> Result<()> {
         stream_thread: Arc::new(Mutex::new(None)),
         spectrum_shared,
         spectrum_bins,
+        control_shared,
     };
 
     start_background_tasks(shared.clone());
@@ -1729,6 +1984,7 @@ async fn main() -> Result<()> {
         .route("/set_eq", post(set_eq_handler))
         .route("/set_eq_type", post(set_eq_type_handler))
         .route("/configure_optimizations", post(configure_opt_handler))
+        .route("/spectrum/ws", post(spectrum_ws_handler))
         .route("/load_stream", post(load_stream_handler))
         .route("/capture/start", post(capture_start_handler))
         .route("/capture/stop", post(capture_stop_handler))

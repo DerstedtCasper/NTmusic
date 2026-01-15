@@ -92,6 +92,8 @@ let spectrumReader = null;
 let spectrumTimer = null;
 let spectrumBins = 0;
 let nativeAddon = null;
+let controlSpecPromise = null;
+let controlWriter = null;
 
 async function getSpectrumSpec() {
     if (!spectrumSpecPromise) {
@@ -100,11 +102,33 @@ async function getSpectrumSpec() {
     return spectrumSpecPromise;
 }
 
+async function getControlSpec() {
+    if (!controlSpecPromise) {
+        controlSpecPromise = ipcRenderer.invoke('nta-get-control-spec').catch(() => null);
+    }
+    return controlSpecPromise;
+}
+
 function ensureNativeAddon() {
     if (!nativeAddon) {
         nativeAddon = loadNativeAddon();
     }
     return nativeAddon;
+}
+
+async function initControlWriter() {
+    if (controlWriter) return controlWriter;
+    const spec = await getControlSpec();
+    if (!spec || !spec.path || !spec.capacity) return null;
+    const native = ensureNativeAddon();
+    if (!native || typeof native.ControlWriter !== 'function') return null;
+    try {
+        controlWriter = new native.ControlWriter(spec.path, spec.capacity);
+        return controlWriter;
+    } catch (_err) {
+        controlWriter = null;
+        return null;
+    }
 }
 
 async function initSpectrumBuffer() {
@@ -138,6 +162,16 @@ async function initSpectrumBuffer() {
 
     return spectrumSharedBuffer;
 }
+
+function clearSpectrumTimer() {
+    if (spectrumTimer) {
+        clearInterval(spectrumTimer);
+        spectrumTimer = null;
+    }
+}
+
+process.on('exit', clearSpectrumTimer);
+process.on('beforeExit', clearSpectrumTimer);
 
 contextBridge.exposeInMainWorld('electron', {
     send: (channel, data) => {
@@ -173,6 +207,22 @@ contextBridge.exposeInMainWorld('ntmusicNta', {
     getSpectrumLength: async () => {
         const spec = await getSpectrumSpec();
         return spec && spec.bins ? spec.bins : 0;
+    },
+    setSpectrumWs: async (enabled) => {
+        try {
+            return await ipcRenderer.invoke('nta-set-spectrum-ws', { enabled: Boolean(enabled) });
+        } catch (_err) {
+            return null;
+        }
+    },
+    sendControl: async (cmd, value = 0) => {
+        const writer = await initControlWriter();
+        if (!writer || typeof writer.push !== 'function') return false;
+        try {
+            return Boolean(writer.push(cmd, value));
+        } catch (_err) {
+            return false;
+        }
     },
     getStatus: async () => {
         const status = await ipcRenderer.invoke('nta-get-status').catch(() => null);
