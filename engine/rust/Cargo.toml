@@ -1,0 +1,23 @@
+[package]
+name = "rust_audio_resampler"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rust_audio_resampler"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23.3", features = ["extension-module"] }
+numpy = "0.23.0"
+ndarray = "0.15.4"
+rubato = "0.14.1"
+
+[profile.release]
+lto = "fat"              # 全程序链接时优化
+codegen-units = 1        # 单代码生成单元，更好优化
+panic = "abort"          # 减少 unwinding 开销
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3

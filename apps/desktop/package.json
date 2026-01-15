@@ -1,0 +1,19 @@
+{
+  "name": "vmusic-desktop",
+  "version": "0.1.0",
+  "description": "VMusic Desktop (skeleton)",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^37.2.6"
+  },
+  "dependencies": {
+    "axios": "^1.10.0",
+    "fs-extra": "^11.3.2",
+    "music-metadata": "^11.4.0",
+    "node-fetch": "^3.3.2"
+  }
+}
