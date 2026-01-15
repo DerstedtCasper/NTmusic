@@ -236,11 +236,11 @@ body {
     border-radius: 16px;
     background-size: cover;
     background-position: center;
-    background-image: url('../../assets/musicdark.jpeg'); /* 默认封面 */
+    background-image: url('../../assets/ntmusic-default.png'); /* 默认封面 */
     transition: background-image 0.5s ease-in-out;
 }
 body.light-theme .album-art {
-    background-image: url('../../assets/musiclight.jpeg');
+    background-image: url('../../assets/ntmusic-default.png');
 }
 
 .track-details {

@@ -9,16 +9,17 @@ use axum::{
 use axum::extract::ws::{Message, WebSocket};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use libloading::Library;
+use memmap2::MmapMut;
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 use ringbuf::traits::{Consumer, Producer, Split};
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     ffi::CStr,
-    fs::File,
+    fs::{File, OpenOptions},
     io::Read,
     os::raw::{c_char, c_void},
     path::{Path, PathBuf},
@@ -47,6 +48,8 @@ struct SharedState {
     output_stream: Arc<Mutex<OutputStreamHolder>>,
     stream_process: Arc<Mutex<Option<Child>>>,
     stream_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    spectrum_shared: Option<Arc<Mutex<SpectrumShared>>>,
+    spectrum_bins: usize,
 }
 
 struct OutputStreamHolder(Option<cpal::Stream>);
@@ -54,6 +57,97 @@ struct OutputStreamHolder(Option<cpal::Stream>);
 // cpal::Stream is !Send/Sync on some platforms; we guard access via a mutex.
 unsafe impl Send for OutputStreamHolder {}
 unsafe impl Sync for OutputStreamHolder {}
+
+struct SpectrumShared {
+    mmap: MmapMut,
+    bins: usize,
+}
+
+const DEFAULT_SPECTRUM_BINS: usize = 48;
+const SPECTRUM_FFT_SIZE: usize = 2048;
+const SPECTRUM_UPDATE_INTERVAL_MS: u64 = 50;
+
+struct SpectrumAnalyzer {
+    fft_size: usize,
+    bins: usize,
+    window: Vec<f32>,
+    input: Vec<Complex<f32>>,
+    output: Vec<f32>,
+    fft: Arc<dyn Fft<f32>>,
+}
+
+impl SpectrumAnalyzer {
+    fn new(fft_size: usize, bins: usize) -> Self {
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(fft_size);
+        let mut window = Vec::with_capacity(fft_size);
+        for i in 0..fft_size {
+            let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / fft_size as f32).cos();
+            window.push(w);
+        }
+        SpectrumAnalyzer {
+            fft_size,
+            bins,
+            window,
+            input: vec![Complex::new(0.0, 0.0); fft_size],
+            output: vec![0.0; bins.max(1)],
+            fft,
+        }
+    }
+
+    fn compute(&mut self, samples: &[f32], sample_rate: u32) -> &[f32] {
+        let output_len = self.output.len();
+        if output_len == 0 {
+            return &self.output;
+        }
+        self.output.fill(0.0);
+        if samples.is_empty() || sample_rate == 0 {
+            return &self.output;
+        }
+
+        let len = samples.len().min(self.fft_size);
+        for i in 0..len {
+            self.input[i].re = samples[i] * self.window[i];
+            self.input[i].im = 0.0;
+        }
+        if len < self.fft_size {
+            for i in len..self.fft_size {
+                self.input[i].re = 0.0;
+                self.input[i].im = 0.0;
+            }
+        }
+
+        self.fft.process(&mut self.input);
+
+        let min_freq = 20.0f32;
+        let max_freq = (sample_rate as f32) / 2.0;
+        if max_freq <= min_freq {
+            return &self.output;
+        }
+        let log_min = min_freq.log10();
+        let log_max = max_freq.log10();
+        let denom = (log_max - log_min).max(1e-6);
+        let mags_len = (self.fft_size / 2).saturating_sub(1);
+        if mags_len == 0 {
+            return &self.output;
+        }
+        for i in 0..mags_len {
+            let mag = self.input[i + 1].norm();
+            let freq = (i as f32 / mags_len as f32) * max_freq;
+            let log_pos = ((freq.max(min_freq).log10() - log_min) / denom) * self.bins as f32;
+            let idx = log_pos.floor() as usize;
+            if idx < self.bins {
+                self.output[idx] = self.output[idx].max(mag);
+            }
+        }
+        for v in self.output.iter_mut() {
+            let db = 20.0f32 * (*v + 1e-9f32).log10();
+            let norm = ((db + 90.0f32) / 90.0f32).clamp(0.0f32, 1.0f32);
+            *v = norm;
+        }
+        &self.output
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct PlaybackState {
@@ -191,6 +285,70 @@ fn initial_dither_seed() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x1234_5678_9abc_def0)
+}
+
+fn parse_spectrum_bins() -> usize {
+    std::env::var("NTMUSIC_SPECTRUM_BINS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_SPECTRUM_BINS)
+}
+
+fn init_spectrum_shared(bins: usize) -> Option<Arc<Mutex<SpectrumShared>>> {
+    let path = match std::env::var("NTMUSIC_SPECTRUM_SHM") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return None,
+    };
+    let byte_len = bins.saturating_mul(std::mem::size_of::<f32>());
+    let file = match OpenOptions::new().read(true).write(true).create(true).open(&path) {
+        Ok(file) => file,
+        Err(err) => {
+            error!("spectrum shm open failed: {}", err);
+            return None;
+        }
+    };
+    if let Err(err) = file.set_len(byte_len as u64) {
+        error!("spectrum shm resize failed: {}", err);
+        return None;
+    }
+    let mmap = unsafe {
+        match MmapMut::map_mut(&file) {
+            Ok(map) => map,
+            Err(err) => {
+                error!("spectrum shm map failed: {}", err);
+                return None;
+            }
+        }
+    };
+    Some(Arc::new(Mutex::new(SpectrumShared { mmap, bins })))
+}
+
+fn write_spectrum_shared(shared: &Option<Arc<Mutex<SpectrumShared>>>, spectrum: &[f32]) {
+    let Some(shared) = shared else {
+        return;
+    };
+    let mut guard = match shared.lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    let available_bins = guard.mmap.len() / std::mem::size_of::<f32>();
+    let bins = guard.bins.min(available_bins);
+    if bins == 0 {
+        return;
+    }
+    let len = bins.min(spectrum.len());
+    let dst = unsafe {
+        std::slice::from_raw_parts_mut(guard.mmap.as_mut_ptr() as *mut f32, bins)
+    };
+    if len > 0 {
+        dst[..len].copy_from_slice(&spectrum[..len]);
+    }
+    if len < bins {
+        for value in &mut dst[len..] {
+            *value = 0.0;
+        }
+    }
 }
 
 type SoxrHandle = *mut c_void;
@@ -365,7 +523,7 @@ fn initial_state() -> EngineState {
         buffer_target_ms: 300,
         buffer_max_ms: 5000,
         underrun_count: 0,
-        last_output_chunk: Vec::new(),
+        last_output_chunk: vec![0.0; SPECTRUM_FFT_SIZE],
         dither_rng: initial_dither_seed(),
     }
 }
@@ -859,50 +1017,6 @@ fn resample_audio_soxr(
     Ok(output)
 }
 
-fn compute_spectrum(samples: &[f32], sample_rate: u32, fft_size: usize, bins: usize) -> Vec<f32> {
-    if samples.is_empty() || sample_rate == 0 {
-        return vec![0.0; bins];
-    }
-    let mut input: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); fft_size];
-    let len = samples.len().min(fft_size);
-    for i in 0..len {
-        let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / fft_size as f32).cos();
-        input[i].re = samples[i] * w;
-    }
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(fft_size);
-    fft.process(&mut input);
-
-    let mut mags = Vec::with_capacity(fft_size / 2);
-    for i in 1..(fft_size / 2) {
-        mags.push(input[i].norm());
-    }
-
-    let min_freq = 20.0f32;
-    let max_freq = (sample_rate as f32) / 2.0;
-    if max_freq <= min_freq {
-        return vec![0.0; bins];
-    }
-
-    let log_min = min_freq.log10();
-    let log_max = max_freq.log10();
-    let mut out = vec![0.0f32; bins];
-    for (i, mag) in mags.iter().enumerate() {
-        let freq = (i as f32 / mags.len() as f32) * max_freq;
-        let log_pos = ((freq.max(min_freq).log10() - log_min) / (log_max - log_min)) * bins as f32;
-        let idx = log_pos.floor() as usize;
-        if idx < bins {
-            out[idx] = out[idx].max(*mag);
-        }
-    }
-    for v in out.iter_mut() {
-        let db = 20.0f32 * (*v + 1e-9f32).log10();
-        let norm = ((db + 90.0f32) / 90.0f32).clamp(0.0f32, 1.0f32);
-        *v = norm;
-    }
-    out
-}
-
 fn next_uniform(seed: &mut u64) -> f32 {
     *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     let value = (*seed >> 32) as u32;
@@ -1063,7 +1177,18 @@ fn fill_output_buffer(state: &Arc<Mutex<EngineState>>, consumer: &Arc<Mutex<Heap
     for sample in data.iter_mut() {
         *sample *= local.volume;
     }
-    local.last_output_chunk = data.to_vec();
+    if local.last_output_chunk.len() != SPECTRUM_FFT_SIZE {
+        local.last_output_chunk.resize(SPECTRUM_FFT_SIZE, 0.0);
+    }
+    let copy_len = data.len().min(SPECTRUM_FFT_SIZE);
+    if copy_len > 0 {
+        local.last_output_chunk[..copy_len].copy_from_slice(&data[..copy_len]);
+    }
+    if copy_len < SPECTRUM_FFT_SIZE {
+        for value in &mut local.last_output_chunk[copy_len..] {
+            *value = 0.0;
+        }
+    }
 }
 fn list_devices() -> Value {
     let mut wasapi = Vec::new();
@@ -1530,18 +1655,33 @@ fn start_background_tasks(shared: SharedState) {
     });
 
     let state_clone = shared.clone();
+    let spectrum_bins = state_clone.spectrum_bins;
+    let spectrum_shared = state_clone.spectrum_shared.clone();
     tokio::spawn(async move {
+        let mut analyzer = SpectrumAnalyzer::new(SPECTRUM_FFT_SIZE, spectrum_bins);
+        let mut sample_buffer = vec![0.0f32; SPECTRUM_FFT_SIZE];
+        let use_ws = spectrum_shared.is_none();
         loop {
-            let (samples, sample_rate) = {
+            let sample_rate = {
                 let state = state_clone.inner.lock().unwrap();
-                (state.last_output_chunk.clone(), state.sample_rate)
+                let copy_len = state.last_output_chunk.len().min(SPECTRUM_FFT_SIZE);
+                if copy_len > 0 {
+                    sample_buffer[..copy_len].copy_from_slice(&state.last_output_chunk[..copy_len]);
+                }
+                if copy_len < SPECTRUM_FFT_SIZE {
+                    for value in &mut sample_buffer[copy_len..] {
+                        *value = 0.0;
+                    }
+                }
+                state.sample_rate
             };
-            if !samples.is_empty() {
-                let spectrum = compute_spectrum(&samples, sample_rate, 2048, 48);
+            let spectrum = analyzer.compute(&sample_buffer, sample_rate);
+            write_spectrum_shared(&spectrum_shared, spectrum);
+            if use_ws {
                 let payload = json!({ "type": "spectrum_data", "data": spectrum });
                 let _ = state_clone.tx.send(payload.to_string());
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(SPECTRUM_UPDATE_INTERVAL_MS)).await;
         }
     });
 }
@@ -1557,6 +1697,8 @@ async fn main() -> Result<()> {
     let rb = HeapRb::<f32>::new(48_000 * 2 * 5);
     let (producer, consumer) = rb.split();
     let (tx, _rx) = broadcast::channel(128);
+    let spectrum_bins = parse_spectrum_bins();
+    let spectrum_shared = init_spectrum_shared(spectrum_bins);
 
     let shared = SharedState {
         inner: Arc::new(Mutex::new(initial_state())),
@@ -1566,6 +1708,8 @@ async fn main() -> Result<()> {
         output_stream: Arc::new(Mutex::new(OutputStreamHolder(None))),
         stream_process: Arc::new(Mutex::new(None)),
         stream_thread: Arc::new(Mutex::new(None)),
+        spectrum_shared,
+        spectrum_bins,
     };
 
     start_background_tasks(shared.clone());

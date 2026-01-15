@@ -45,6 +45,10 @@ function getSoxrDir() {
     return path.join(getAppDataRoot(), 'deps', 'soxr');
 }
 
+function getNtaDir() {
+    return path.join(getAppDataRoot(), 'nta');
+}
+
 function resolveEngineBinary() {
     const executable = process.platform === 'win32' ? 'vmusic_engine.exe' : 'vmusic_engine';
     const appRoot = getAppRoot();
@@ -68,6 +72,7 @@ async function ensureAppDataDirs() {
     const appDataRoot = getAppDataRoot();
     await fs.ensureDir(appDataRoot);
     await fs.ensureDir(getSoxrDir());
+    await fs.ensureDir(getNtaDir());
 }
 
 function startAudioEngine() {
@@ -84,6 +89,7 @@ function startAudioEngine() {
         }
         const engineDir = path.dirname(enginePath);
         const soxrDir = process.env.VMUSIC_SOXR_DIR || getSoxrDir();
+        const spectrumSpec = ntaBridge ? ntaBridge.getSpectrumSpec() : null;
         const env = {
             ...process.env,
             VMUSIC_ENGINE_PORT: String(ENGINE_PORT),
@@ -91,6 +97,10 @@ function startAudioEngine() {
             VMUSIC_ASSET_DIR: engineDir,
             VMUSIC_SOXR_DIR: soxrDir
         };
+        if (spectrumSpec && spectrumSpec.path) {
+            env.NTMUSIC_SPECTRUM_SHM = spectrumSpec.path;
+            env.NTMUSIC_SPECTRUM_BINS = String(spectrumSpec.bins || 0);
+        }
 
         audioEngineProcess = spawn(enginePath, [], { cwd: engineDir, env });
 
@@ -161,7 +171,7 @@ function registerWindowControls() {
 
 function registerNtaBridgeIpc() {
     if (!ntaBridge) return;
-    ipcMain.handle('nta-get-spectrum-buffer', () => ntaBridge.getSpectrumBuffer());
+    ipcMain.handle('nta-get-spectrum-spec', () => ntaBridge.getSpectrumSpec());
     ipcMain.handle('nta-get-spectrum-length', () => ntaBridge.getSpectrumLength());
     ipcMain.handle('nta-get-status', () => ntaBridge.getStatus());
 }
@@ -172,7 +182,8 @@ async function bootstrap() {
     ntaBridge = createNtaBridge({
         appRoot: getAppRoot(),
         resourcesPath: process.resourcesPath,
-        isPackaged: app.isPackaged
+        isPackaged: app.isPackaged,
+        spectrumDir: getNtaDir()
     });
     registerNtaBridgeIpc();
 

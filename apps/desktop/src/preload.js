@@ -1,4 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const path = require('path');
+const fs = require('fs');
 
 const sendChannels = [
     'open-music-folder',
@@ -29,8 +31,8 @@ const invokeChannels = [
     'music-capture-stop',
     'music-get-capture-devices',
     'music-get-engine-url',
-    'nta-get-spectrum-buffer',
     'nta-get-spectrum-length',
+    'nta-get-spectrum-spec',
     'nta-get-status',
     'music-get-lyrics',
     'music-fetch-lyrics',
@@ -48,6 +50,94 @@ const onChannels = [
     'music-set-track',
     'theme-updated'
 ];
+
+const DEFAULT_SPECTRUM_POLL_MS = 50;
+
+function getAppRoot() {
+    const isPackaged = !process.defaultApp;
+    return isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', '..');
+}
+
+function resolveNativeAddon() {
+    const isPackaged = !process.defaultApp;
+    const appRoot = getAppRoot();
+    const candidates = isPackaged
+        ? [path.join(process.resourcesPath, 'native', 'ntmusic_core.node')]
+        : [
+              path.join(appRoot, 'engine', 'rust', 'ntmusic_core', 'dist', 'ntmusic_core.node'),
+              path.join(appRoot, 'engine', 'rust', 'ntmusic_core', 'target', 'release', 'ntmusic_core.node')
+          ];
+
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+function loadNativeAddon() {
+    const addonPath = resolveNativeAddon();
+    if (!addonPath) return null;
+    try {
+        return require(addonPath);
+    } catch (_err) {
+        return null;
+    }
+}
+
+let spectrumSpecPromise = null;
+let spectrumSharedBuffer = null;
+let spectrumReader = null;
+let spectrumTimer = null;
+let spectrumBins = 0;
+let nativeAddon = null;
+
+async function getSpectrumSpec() {
+    if (!spectrumSpecPromise) {
+        spectrumSpecPromise = ipcRenderer.invoke('nta-get-spectrum-spec').catch(() => null);
+    }
+    return spectrumSpecPromise;
+}
+
+function ensureNativeAddon() {
+    if (!nativeAddon) {
+        nativeAddon = loadNativeAddon();
+    }
+    return nativeAddon;
+}
+
+async function initSpectrumBuffer() {
+    if (spectrumSharedBuffer) return spectrumSharedBuffer;
+    const spec = await getSpectrumSpec();
+    if (!spec || !spec.path || !spec.bins) return null;
+    const native = ensureNativeAddon();
+    if (!native || typeof native.SpectrumReader !== 'function') return null;
+
+    try {
+        spectrumReader = new native.SpectrumReader(spec.path, spec.bins);
+    } catch (_err) {
+        spectrumReader = null;
+        return null;
+    }
+
+    if (typeof SharedArrayBuffer === 'undefined') return null;
+    spectrumBins = spec.bins;
+    const byteLength = spec.byteLength || spec.bins * Float32Array.BYTES_PER_ELEMENT;
+    spectrumSharedBuffer = new SharedArrayBuffer(byteLength);
+    const spectrumView = new Float32Array(spectrumSharedBuffer);
+
+    spectrumTimer = setInterval(() => {
+        if (!spectrumReader) return;
+        try {
+            spectrumReader.readInto(spectrumView);
+        } catch (_err) {
+            // Keep last buffer if sync fails.
+        }
+    }, DEFAULT_SPECTRUM_POLL_MS);
+
+    return spectrumSharedBuffer;
+}
 
 contextBridge.exposeInMainWorld('electron', {
     send: (channel, data) => {
@@ -79,7 +169,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
 });
 
 contextBridge.exposeInMainWorld('ntmusicNta', {
-    getSpectrumBuffer: () => ipcRenderer.invoke('nta-get-spectrum-buffer'),
-    getSpectrumLength: () => ipcRenderer.invoke('nta-get-spectrum-length'),
-    getStatus: () => ipcRenderer.invoke('nta-get-status')
+    getSpectrumBuffer: () => initSpectrumBuffer(),
+    getSpectrumLength: async () => {
+        const spec = await getSpectrumSpec();
+        return spec && spec.bins ? spec.bins : 0;
+    },
+    getStatus: async () => {
+        const status = await ipcRenderer.invoke('nta-get-status').catch(() => null);
+        return {
+            ...(status || {}),
+            shared: Boolean(spectrumSharedBuffer),
+            bins: spectrumBins || (status && status.bins) || 0
+        };
+    }
 });

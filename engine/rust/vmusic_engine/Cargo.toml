@@ -20,3 +20,4 @@ uuid = { version = "1.10", features = ["v4"] }
 rubato = "0.14.1"
 libloading = "0.8"
 soxr-sys = { version = "0.1.1", optional = true }
+memmap2 = "0.9"

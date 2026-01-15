@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs-extra');
 
 const DEFAULT_SPECTRUM_BINS = 48;
+const DEFAULT_SPECTRUM_DIR = 'nta';
 
 function resolveNativeAddon(appRoot, resourcesPath, isPackaged) {
     const candidates = isPackaged
@@ -29,36 +30,37 @@ function loadNativeAddon(appRoot, resourcesPath, isPackaged) {
     }
 }
 
-function createSpectrumBuffer(length) {
-    const byteLength = length * Float32Array.BYTES_PER_ELEMENT;
-    if (typeof SharedArrayBuffer !== 'undefined') {
-        return new SharedArrayBuffer(byteLength);
+function createSpectrumSpec({ native, spectrumBins, spectrumDir }) {
+    if (!native || typeof native.createSpectrumShm !== 'function') {
+        return null;
     }
-    return new ArrayBuffer(byteLength);
+    try {
+        fs.ensureDirSync(spectrumDir);
+        return native.createSpectrumShm(spectrumDir, spectrumBins);
+    } catch (_err) {
+        return null;
+    }
 }
 
-function createNtaBridge({ appRoot, resourcesPath, isPackaged, spectrumBins = DEFAULT_SPECTRUM_BINS }) {
+function createNtaBridge({
+    appRoot,
+    resourcesPath,
+    isPackaged,
+    spectrumBins = DEFAULT_SPECTRUM_BINS,
+    spectrumDir = DEFAULT_SPECTRUM_DIR
+}) {
     const native = loadNativeAddon(appRoot, resourcesPath, isPackaged);
-    let spectrumBuffer = null;
-    if (native && typeof native.createSpectrumBuffer === 'function') {
-        try {
-            spectrumBuffer = native.createSpectrumBuffer(spectrumBins);
-        } catch (_err) {
-            spectrumBuffer = null;
-        }
-    }
-
-    if (!spectrumBuffer) {
-        spectrumBuffer = createSpectrumBuffer(spectrumBins);
-    }
+    const spectrumSpec = createSpectrumSpec({ native, spectrumBins, spectrumDir });
+    const mode = spectrumSpec ? 'native' : 'fallback';
 
     return {
-        getSpectrumBuffer: () => spectrumBuffer,
+        getSpectrumSpec: () => spectrumSpec,
         getSpectrumLength: () => spectrumBins,
         getStatus: () => ({
-            mode: native ? 'native' : 'fallback',
-            shared: typeof SharedArrayBuffer !== 'undefined',
-            bins: spectrumBins
+            mode,
+            shared: Boolean(spectrumSpec),
+            bins: spectrumBins,
+            path: spectrumSpec ? spectrumSpec.path : null
         })
     };
 }

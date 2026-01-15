@@ -166,17 +166,6 @@ let isDraggingProgress = false;
         }
     };
 
-    const writeSpectrumToShared = (data) => {
-        if (!spectrumSharedView || !Array.isArray(data)) return;
-        const len = Math.min(spectrumSharedView.length, data.length);
-        for (let i = 0; i < len; i++) {
-            spectrumSharedView[i] = data[i];
-        }
-        if (len < spectrumSharedView.length) {
-            spectrumSharedView.fill(0, len);
-        }
-    };
-
     const initNtaSpectrum = async () => {
         if (!window.ntmusicNta || typeof window.ntmusicNta.getSpectrumBuffer !== 'function') {
             return;
@@ -188,7 +177,10 @@ let isDraggingProgress = false;
             if (!buffer || !bins) return;
             spectrumSharedView = new Float32Array(buffer);
             spectrumSharedBins = bins;
-            useSharedSpectrum = Boolean(status && status.shared);
+            useSharedSpectrum = Boolean(status && status.shared && spectrumSharedView);
+            if (spectrumSharedView && currentVisualizerData.length === 0) {
+                currentVisualizerData = Array(spectrumSharedView.length).fill(0);
+            }
         } catch (_err) {
             spectrumSharedView = null;
             spectrumSharedBins = 0;
@@ -228,12 +220,7 @@ let isDraggingProgress = false;
             }
             if (payload.type === 'spectrum_data' && isPlaying) {
                 const data = payload.data || [];
-                if (useSharedSpectrum && spectrumSharedView) {
-                    writeSpectrumToShared(data);
-                    if (currentVisualizerData.length === 0) {
-                        currentVisualizerData = Array(spectrumSharedView.length).fill(0);
-                    }
-                } else {
+                if (!useSharedSpectrum) {
                     targetVisualizerData = data;
                     if (currentVisualizerData.length === 0) {
                         currentVisualizerData = Array(targetVisualizerData.length).fill(0);
@@ -448,7 +435,7 @@ class WebNowPlayingAdapter {
             trackTitle.textContent = '未选择歌曲';
             trackArtist.textContent = '未知艺术家';
             trackBitrate.textContent = '';
-            const defaultArtUrl = `url('../../assets/${currentTheme === 'light' ? 'musiclight.jpeg' : 'musicdark.jpeg'}')`;
+            const defaultArtUrl = `url('../../assets/ntmusic-default.png')`;
             albumArt.style.backgroundImage = defaultArtUrl;
             updateBlurredBackground('none'); // 没有歌曲时，回退到全局背景
             renderPlaylist();
@@ -468,7 +455,7 @@ class WebNowPlayingAdapter {
             trackBitrate.textContent = '';
         }
         
-        const defaultArtUrl = `url('../../assets/${currentTheme === 'light' ? 'musiclight.jpeg' : 'musicdark.jpeg'}')`;
+        const defaultArtUrl = `url('../../assets/ntmusic-default.png')`;
         if (track.albumArt) {
             const albumArtUrl = `url('file://${track.albumArt.replace(/\\/g, '/')}')`;
             albumArt.style.backgroundImage = albumArtUrl;
@@ -1518,8 +1505,13 @@ class WebNowPlayingAdapter {
             });
         });
         const currentArt = albumArt.style.backgroundImage;
-        if (!currentArt || currentArt.includes('musicdark.jpeg') || currentArt.includes('musiclight.jpeg')) {
-            const defaultArtUrl = `url('../../assets/${theme === 'light' ? 'musiclight.jpeg' : 'musicdark.jpeg'}')`;
+        if (
+            !currentArt ||
+            currentArt.includes('ntmusic-default.png') ||
+            currentArt.includes('musicdark.jpeg') ||
+            currentArt.includes('musiclight.jpeg')
+        ) {
+            const defaultArtUrl = `url('../../assets/ntmusic-default.png')`;
             albumArt.style.backgroundImage = defaultArtUrl;
             updateBlurredBackground(defaultArtUrl);
         }

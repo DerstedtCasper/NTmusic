@@ -37,6 +37,10 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "../../engine/rust/ntmusic_core/dist/ntmusic_core.node",
+        "to": "native/ntmusic_core.node"
       }
     ],
     "win": {
