@@ -1,28 +1,19 @@
-# VMusic 独立播放器骨架（Rust 引擎）
-## 目录结构
-```
-vmusic/
-  apps/desktop/         Electron UI
-  engine/rust/          Rust 引擎源码
-  engine/bin/           Rust 引擎 exe + ffmpeg.exe
-  tools/               轮子探针与辅助脚本
-  docs/                文档
-  AppData/             运行期数据
-```
+﻿# NTmusic
 
-## 启动（占位）
-1. 安装 `apps/desktop` 的依赖
-2. 构建 `engine/rust/vmusic_engine`
-3. 运行 `npm start`（主进程自动启动 Rust 引擎）
+NTmusic 是一个基于 Rust 引擎的独立音频播放器项目，源自 VCPChat 播放器的二次开发。该项目目标是把核心播放能力拆出为可维护、可扩展的独立形态。
 
-## 端口与路径
-- `VMUSIC_ENGINE_URL`：覆盖 UI 访问的引擎地址
-- `VMUSIC_ENGINE_PORT`：覆盖引擎启动端口（主进程会传入）
-- `VMUSIC_ASSET_DIR`：`ffmpeg.exe` 所在目录
-- `VMUSIC_SOXR_DIR`（预留）：`soxr.dll`/`soxr.lib` 所在目录（默认 `AppData/deps/soxr`）
+## 设计目标
+- **Rust-only 引擎**：运行时不依赖 Python，提升稳定性与性能上限。
+- **前后端解耦**：统一 HTTP/WS 协议，UI 与引擎独立演进。
+- **音质优先**：重采样与 DSP 可持续补齐与升级（EQ/噪声整形等）。
+- **多输入模式**：本地文件为主，预留流媒体与系统捕获扩展。
+- **Windows 优先**：先保障 Windows 体验，再推进跨平台。
 
-## 复用来源
-- UI：`D:\AI bot\VCPChat\Musicmodules`
-- IPC：`D:\AI bot\VCPChat\modules\ipc\musicHandlers.js`
-- 引擎参考：`D:\AI bot\VCPChat\audio_engine`
-- Rust 参考：`D:\AI bot\VCPChat\rust_audio_engine`
+## 项目概览
+- **apps/desktop**：Electron UI（播放器界面与交互）。
+- **engine/rust/vmusic_engine**：Rust 音频引擎（HTTP + WS）。
+- **engine/bin**：运行时依赖（如 `ffmpeg.exe`、`soxr` 等）。
+- **AppData**：播放列表、封面、歌词等运行数据（不入库）。
+
+## 开发定位
+这个仓库是“播放器骨架 + 高性能引擎”的独立形态，不追求与旧版 100% 功能一致；优先保证结构清晰、可扩展和工程可维护。
