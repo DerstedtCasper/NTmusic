@@ -3,17 +3,11 @@ const path = require('path');
 const fs = require('fs-extra');
 const { spawn } = require('child_process');
 
-const musicHandlers = require('./ipc/musicHandlers');
-
-const APP_ROOT = path.join(__dirname, '..', '..', '..');
-const APP_DATA_ROOT = path.join(APP_ROOT, 'AppData');
-const RESAMPLE_CACHE_DIR = path.join(APP_DATA_ROOT, 'ResampleCache');
-const ENGINE_ROOT = path.join(APP_ROOT, 'engine', 'python');
-const ENGINE_SCRIPT = path.join(ENGINE_ROOT, 'main.py');
+const DEFAULT_ENGINE_PORT = 55554;
 const ENGINE_PORT = (() => {
     if (process.env.VMUSIC_ENGINE_PORT) {
         const port = parseInt(process.env.VMUSIC_ENGINE_PORT, 10);
-        return Number.isFinite(port) ? port : 55554;
+        return Number.isFinite(port) ? port : DEFAULT_ENGINE_PORT;
     }
     if (process.env.VMUSIC_ENGINE_URL) {
         try {
@@ -22,19 +16,51 @@ const ENGINE_PORT = (() => {
                 return parseInt(parsed.port, 10);
             }
         } catch (_err) {
-            return 55554;
+            return DEFAULT_ENGINE_PORT;
         }
     }
-    return 55554;
+    return DEFAULT_ENGINE_PORT;
 })();
+const ENGINE_URL = process.env.VMUSIC_ENGINE_URL || `http://127.0.0.1:${ENGINE_PORT}`;
+process.env.VMUSIC_ENGINE_URL = ENGINE_URL;
+process.env.VMUSIC_ENGINE_PORT = String(ENGINE_PORT);
+
+const musicHandlers = require('./ipc/musicHandlers');
 
 let audioEngineProcess = null;
 let mainWindow = null;
 let openChildWindows = [];
 
+function getAppRoot() {
+    return app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', '..');
+}
+
+function getAppDataRoot() {
+    return app.isPackaged ? app.getPath('userData') : path.join(getAppRoot(), 'AppData');
+}
+
+function resolveEngineBinary() {
+    const executable = process.platform === 'win32' ? 'vmusic_engine.exe' : 'vmusic_engine';
+    const appRoot = getAppRoot();
+    const candidates = app.isPackaged
+        ? [path.join(process.resourcesPath, 'engine', executable)]
+        : [
+              path.join(appRoot, 'engine', 'bin', executable),
+              path.join(appRoot, 'engine', 'rust', 'vmusic_engine', 'target', 'release', executable),
+              path.join(appRoot, 'engine', 'rust', 'vmusic_engine', 'target', 'debug', executable)
+          ];
+
+    for (const candidate of candidates) {
+        if (fs.pathExistsSync(candidate)) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
 async function ensureAppDataDirs() {
-    await fs.ensureDir(APP_DATA_ROOT);
-    await fs.ensureDir(RESAMPLE_CACHE_DIR);
+    const appDataRoot = getAppDataRoot();
+    await fs.ensureDir(appDataRoot);
 }
 
 function startAudioEngine() {
@@ -44,15 +70,20 @@ function startAudioEngine() {
             return;
         }
 
-        const args = [
-            '-u',
-            ENGINE_SCRIPT,
-            '--resample-cache-dir',
-            RESAMPLE_CACHE_DIR,
-            '--port',
-            String(ENGINE_PORT)
-        ];
-        audioEngineProcess = spawn('python', args, { cwd: ENGINE_ROOT });
+        const enginePath = resolveEngineBinary();
+        if (!enginePath) {
+            reject(new Error('Rust audio engine not found. Please build vmusic_engine.exe.'));
+            return;
+        }
+        const engineDir = path.dirname(enginePath);
+        const env = {
+            ...process.env,
+            VMUSIC_ENGINE_PORT: String(ENGINE_PORT),
+            VMUSIC_ENGINE_URL: ENGINE_URL,
+            VMUSIC_ASSET_DIR: engineDir
+        };
+
+        audioEngineProcess = spawn(enginePath, [], { cwd: engineDir, env });
 
         const readyTimeout = setTimeout(() => {
             reject(new Error('Audio Engine timed out.'));
@@ -60,7 +91,7 @@ function startAudioEngine() {
 
         audioEngineProcess.stdout.on('data', (data) => {
             const output = data.toString().trim();
-            if (output.includes('FLASK_SERVER_READY')) {
+            if (output.includes('VMUSIC_ENGINE_READY')) {
                 clearTimeout(readyTimeout);
                 resolve();
             }
@@ -126,7 +157,7 @@ async function bootstrap() {
     musicHandlers.initialize({
         mainWindow,
         openChildWindows,
-        APP_DATA_ROOT_IN_PROJECT: APP_DATA_ROOT,
+        APP_DATA_ROOT_IN_PROJECT: getAppDataRoot(),
         startAudioEngine,
         stopAudioEngine
     });

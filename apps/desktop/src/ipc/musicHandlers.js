@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs-extra');
 const { Worker } = require('worker_threads');
 const lyricFetcher = require('../services/lyricFetcher'); // Import the new lyric fetcher
-const AUDIO_ENGINE_URL = process.env.VMUSIC_ENGINE_URL || 'http://127.0.0.1:55554';
+const getAudioEngineUrl = () => process.env.VMUSIC_ENGINE_URL || 'http://127.0.0.1:55554';
 let fetch;
 
 let musicWindow = null;
@@ -118,7 +118,7 @@ async function audioEngineApi(endpoint, method = 'POST', body = null) {
     try {
         if (!fetch) throw new Error('node-fetch module is not available yet.');
 
-        const url = `${AUDIO_ENGINE_URL}${endpoint}`;
+        const url = `${getAudioEngineUrl()}${endpoint}`;
         const options = {
             method,
             headers: { 'Content-Type': 'application/json' },
@@ -237,15 +237,23 @@ function initialize(options) {
         });
 
         ipcMain.handle('music-play', () => {
-            // 只有在有歌曲信息时才真正播放
             if (currentSongInfo) {
                 return audioEngineApi('/play', 'POST');
             }
-            return { status: 'error', message: 'No song loaded to play.' };
+            return audioEngineApi('/state', 'GET').then((state) => {
+                if (state.status === 'success' && state.state && ['stream', 'capture'].includes(state.state.mode)) {
+                    return audioEngineApi('/play', 'POST');
+                }
+                return { status: 'error', message: 'No song loaded to play.' };
+            });
         });
 
         ipcMain.handle('music-pause', () => {
             return audioEngineApi('/pause', 'POST');
+        });
+
+        ipcMain.handle('music-stop', () => {
+            return audioEngineApi('/stop', 'POST');
         });
 
         ipcMain.handle('music-seek', (event, positionSeconds) => {
@@ -285,6 +293,29 @@ function initialize(options) {
 
         ipcMain.handle('music-configure-optimizations', (event, data) => {
             return audioEngineApi('/configure_optimizations', 'POST', data);
+        });
+
+        ipcMain.handle('music-load-stream', (event, { url }) => {
+            if (!url) {
+                return { status: 'error', message: 'Stream url is required.' };
+            }
+            return audioEngineApi('/load_stream', 'POST', { url });
+        });
+
+        ipcMain.handle('music-capture-start', (event, data) => {
+            return audioEngineApi('/capture/start', 'POST', data || {});
+        });
+
+        ipcMain.handle('music-capture-stop', () => {
+            return audioEngineApi('/capture/stop', 'POST');
+        });
+
+        ipcMain.handle('music-get-capture-devices', () => {
+            return audioEngineApi('/capture/devices', 'GET');
+        });
+
+        ipcMain.handle('music-get-engine-url', () => {
+            return { status: 'success', url: getAudioEngineUrl() };
         });
  
          ipcMain.on('open-music-folder', async (event) => {

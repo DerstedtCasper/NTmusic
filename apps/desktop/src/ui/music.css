@@ -272,6 +272,81 @@ body.light-theme .album-art {
     margin-top: 4px;
 }
 
+.source-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.source-select {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.source-select label {
+    font-size: 0.85em;
+    color: var(--music-text-secondary);
+}
+
+#input-source,
+#capture-device {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    color: var(--music-text);
+    padding: 6px 10px;
+}
+
+.source-status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.75em;
+    color: var(--music-text-secondary);
+}
+
+.stream-status,
+.buffer-status {
+    opacity: 0.85;
+}
+
+.live-indicator {
+    background: #e04848;
+    color: #fff;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    letter-spacing: 0.5px;
+}
+
+.source-controls {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.source-controls.active {
+    display: flex;
+}
+
+#stream-url {
+    flex: 1;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    color: var(--music-text);
+    padding: 8px 10px;
+}
+
+.small-btn {
+    padding: 6px 12px;
+    font-size: 0.8em;
+}
+
 
 /* 进度条 */
 .progress-section {
@@ -290,6 +365,11 @@ body.light-theme .album-art {
     width: 100%;
     padding: 5px 0; /* 增加点击区域 */
     cursor: pointer;
+}
+
+.progress-container.disabled {
+    pointer-events: none;
+    opacity: 0.5;
 }
 
 .progress-bar {

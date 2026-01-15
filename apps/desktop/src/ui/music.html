@@ -46,6 +46,32 @@
                     </button>
                 </div>
 
+                <div class="source-bar">
+                    <div class="source-select">
+                        <label for="input-source">输入源</label>
+                        <select id="input-source">
+                            <option value="file">本地文件</option>
+                            <option value="stream">流媒体 URL</option>
+                            <option value="capture">系统捕获</option>
+                        </select>
+                    </div>
+                    <div class="source-status">
+                        <span id="live-indicator" class="live-indicator" hidden>LIVE</span>
+                        <span id="stream-status" class="stream-status"></span>
+                        <span id="buffer-status" class="buffer-status"></span>
+                    </div>
+                </div>
+                <div id="stream-controls" class="source-controls">
+                    <input id="stream-url" type="text" placeholder="输入流媒体 URL">
+                    <button id="stream-start-btn" class="control-btn small-btn">启动</button>
+                    <button id="stream-stop-btn" class="control-btn small-btn">停止</button>
+                </div>
+                <div id="capture-controls" class="source-controls">
+                    <select id="capture-device"></select>
+                    <button id="capture-start-btn" class="control-btn small-btn">开始</button>
+                    <button id="capture-stop-btn" class="control-btn small-btn">停止</button>
+                </div>
+
                 <div class="progress-section">
                     <canvas id="visualizer"></canvas>
                     <div class="progress-container">
@@ -193,7 +219,6 @@
         </div>
     </div>
     <!-- 确保 JS 在 body 结束前加载 -->
-    <script src="socket.io.min.js"></script>
     <script src="music.js"></script>
 </body>
 </html>

@@ -28,6 +28,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const visualizerCanvas = document.getElementById('visualizer');
     const visualizerCtx = visualizerCanvas.getContext('2d');
     const shareBtn = document.getElementById('share-btn');
+    const inputSourceSelect = document.getElementById('input-source');
+    const streamControls = document.getElementById('stream-controls');
+    const streamUrlInput = document.getElementById('stream-url');
+    const streamStartBtn = document.getElementById('stream-start-btn');
+    const streamStopBtn = document.getElementById('stream-stop-btn');
+    const captureControls = document.getElementById('capture-controls');
+    const captureDeviceSelect = document.getElementById('capture-device');
+    const captureStartBtn = document.getElementById('capture-start-btn');
+    const captureStopBtn = document.getElementById('capture-stop-btn');
+    const liveIndicator = document.getElementById('live-indicator');
+    const streamStatusEl = document.getElementById('stream-status');
+    const bufferStatusEl = document.getElementById('buffer-status');
    // --- New UI Elements for WASAPI ---
    const deviceSelect = document.getElementById('device-select');
    const wasapiSwitch = document.getElementById('wasapi-switch');
@@ -53,6 +65,10 @@ document.addEventListener('DOMContentLoaded', () => {
     let playlist = [];
     let currentTrackIndex = 0;
     let isPlaying = false; // 本地UI状态，会与引擎同步
+    let currentInputMode = 'file';
+    let engineUrl = 'http://127.0.0.1:55554';
+    let engineWs = null;
+    let wsReconnectTimer = null;
     const playModes = ['repeat', 'repeat-one', 'shuffle'];
     let currentPlayMode = 0;
     let currentTheme = 'dark';
@@ -132,34 +148,76 @@ let isDraggingProgress = false;
     };
  
     // --- WebSocket for Visualization ---
-    const socket = io("http://127.0.0.1:5555");
-
-    socket.on('connect', () => {
-        // console.log('[Music.js] Connected to Python Audio Engine via WebSocket.');
-        if (!animationFrameId) {
-            startVisualizerAnimation(); // 连接成功后启动动画循环
-        }
-    });
-
-    socket.on('spectrum_data', (specData) => {
-        if (isPlaying) {
-            // 只更新目标数据，让动画循环去处理绘制
-            targetVisualizerData = specData.data;
-            if (currentVisualizerData.length === 0) {
-                // 初始化当前数据，避免从0开始跳变
-                currentVisualizerData = Array(targetVisualizerData.length).fill(0);
+    const resolveEngineUrl = async () => {
+        if (!window.electron) return;
+        try {
+            const result = await window.electron.invoke('music-get-engine-url');
+            if (result && result.status === 'success' && result.url) {
+                engineUrl = result.url;
             }
+        } catch (_err) {
+            // fallback to default engineUrl
         }
-    });
-    
-    socket.on('playback_state', (state) => {
-        // console.log('[Music.js] Received playback state from engine:', state);
-        updateUIWithState(state);
-    });
+    };
 
-    socket.on('disconnect', () => {
-        // console.log('[Music.js] Disconnected from Python Audio Engine WebSocket.');
-    });
+    const toWsUrl = (url) => {
+        try {
+            const parsed = new URL(url);
+            parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+            parsed.pathname = '/ws';
+            parsed.search = '';
+            return parsed.toString();
+        } catch (_err) {
+            return 'ws://127.0.0.1:55554/ws';
+        }
+    };
+
+    const connectEngineSocket = async () => {
+        await resolveEngineUrl();
+        const wsUrl = toWsUrl(engineUrl);
+        engineWs = new WebSocket(wsUrl);
+
+        engineWs.onopen = () => {
+            if (!animationFrameId) {
+                startVisualizerAnimation();
+            }
+        };
+
+        engineWs.onmessage = (event) => {
+            let payload;
+            try {
+                payload = JSON.parse(event.data);
+            } catch (_err) {
+                return;
+            }
+            if (payload.type === 'spectrum_data' && isPlaying) {
+                targetVisualizerData = payload.data || [];
+                if (currentVisualizerData.length === 0) {
+                    currentVisualizerData = Array(targetVisualizerData.length).fill(0);
+                }
+                return;
+            }
+            if (payload.type === 'playback_state') {
+                updateUIWithState(payload.state);
+                return;
+            }
+            if (payload.type === 'buffer_state') {
+                updateBufferState(payload);
+                return;
+            }
+            if (payload.type === 'stream_state') {
+                updateStreamState(payload);
+            }
+        };
+
+        engineWs.onclose = () => {
+            engineWs = null;
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+            }
+            wsReconnectTimer = setTimeout(connectEngineSocket, 2000);
+        };
+    };
 
 
     // --- Helper Functions ---
@@ -184,6 +242,48 @@ let isDraggingProgress = false;
             g: parseInt(result[2], 16),
             b: parseInt(result[3], 16)
         } : null;
+    };
+
+    const setInputMode = (mode) => {
+        const normalized = mode === 'stream' || mode === 'capture' ? mode : 'file';
+        currentInputMode = normalized;
+        if (inputSourceSelect) {
+            inputSourceSelect.value = normalized;
+        }
+        if (streamControls) {
+            streamControls.classList.toggle('active', normalized === 'stream');
+        }
+        if (captureControls) {
+            captureControls.classList.toggle('active', normalized === 'capture');
+        }
+        progressContainer.classList.toggle('disabled', normalized !== 'file');
+        const isLive = normalized === 'stream' || normalized === 'capture';
+        if (liveIndicator) {
+            liveIndicator.hidden = !isLive;
+        }
+        if (!isLive) {
+            if (streamStatusEl) streamStatusEl.textContent = '';
+            if (bufferStatusEl) bufferStatusEl.textContent = '';
+        }
+    };
+
+    const updateStreamState = (payload) => {
+        if (!streamStatusEl) return;
+        if (!payload || !payload.status) {
+            streamStatusEl.textContent = '';
+            return;
+        }
+        const errorText = payload.error ? ` (${payload.error})` : '';
+        streamStatusEl.textContent = `状态: ${payload.status}${errorText}`;
+    };
+
+    const updateBufferState = (payload) => {
+        if (!bufferStatusEl) return;
+        if (!payload || typeof payload.buffered_ms !== 'number') {
+            bufferStatusEl.textContent = '';
+            return;
+        }
+        bufferStatusEl.textContent = `缓冲 ${Math.round(payload.buffered_ms)}ms`;
     };
 
 // --- Rainmeter WebNowPlaying Adapter ---
@@ -290,6 +390,7 @@ class WebNowPlayingAdapter {
         }
         
         currentTrackIndex = trackIndex;
+        setInputMode('file');
         const track = playlist[trackIndex];
 
         // 更新UI
@@ -329,7 +430,7 @@ class WebNowPlayingAdapter {
     };
 
     const playTrack = async () => {
-        if (playlist.length === 0) return;
+        if (currentInputMode === 'file' && playlist.length === 0) return;
         const result = await window.electron.invoke('music-play');
         if (result.status === 'success') {
             isPlaying = true;
@@ -390,6 +491,12 @@ class WebNowPlayingAdapter {
             navigator.mediaSession.playbackState = (state.is_playing && !state.is_paused) ? 'playing' : 'paused';
         }
         
+        const engineMode = state.mode || currentInputMode;
+        const displayMode = engineMode === 'idle' ? currentInputMode : engineMode;
+        if (engineMode && engineMode !== 'idle' && engineMode !== currentInputMode) {
+            setInputMode(engineMode);
+        }
+
         isPlaying = state.is_playing && !state.is_paused;
         playPauseBtn.classList.toggle('is-playing', isPlaying);
 
@@ -399,14 +506,14 @@ class WebNowPlayingAdapter {
         lastKnownCurrentTime = currentTime;
         lastStateUpdateTime = Date.now();
         
-        durationEl.textContent = formatTime(duration);
+        durationEl.textContent = displayMode === 'file' ? formatTime(duration) : 'LIVE';
         currentTimeEl.textContent = formatTime(currentTime);
         
-        const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+        const progressPercent = displayMode === 'file' && duration > 0 ? (currentTime / duration) * 100 : 0;
         progress.style.width = `${progressPercent}%`;
 
         // 检查播放是否已结束
-        if (state.is_playing === false && currentTrackIndex !== -1 && currentTime > 0) {
+        if (displayMode === 'file' && state.is_playing === false && currentTrackIndex !== -1 && currentTime > 0) {
              // 播放结束
             // console.log("Playback seems to have ended.");
             stopStatePolling();
@@ -449,6 +556,25 @@ class WebNowPlayingAdapter {
       // Update upsampling UI
       if (state.target_samplerate !== undefined && upsamplingSelect.value !== state.target_samplerate) {
           upsamplingSelect.value = state.target_samplerate || 0;
+      }
+
+      if (displayMode === 'stream') {
+          trackTitle.textContent = '流媒体播放';
+          trackArtist.textContent = state.stream_status ? `状态: ${state.stream_status}` : 'LIVE';
+          trackBitrate.textContent = '';
+      } else if (displayMode === 'capture') {
+          trackTitle.textContent = '系统捕获';
+          trackArtist.textContent = state.stream_status ? `状态: ${state.stream_status}` : 'LIVE';
+          trackBitrate.textContent = '';
+      }
+
+      if (displayMode === 'stream' || displayMode === 'capture') {
+          if (streamStatusEl && state.stream_status) {
+              streamStatusEl.textContent = `状态: ${state.stream_status}`;
+          }
+          if (bufferStatusEl && typeof state.buffered_ms === 'number') {
+              bufferStatusEl.textContent = `缓冲 ${Math.round(state.buffered_ms)}ms`;
+          }
       }
       if (wnpAdapter) wnpAdapter.sendUpdate();
   };
@@ -639,6 +765,8 @@ class WebNowPlayingAdapter {
     let dragInProgress = false; // Use a different name to avoid conflict
     
     const handleProgressUpdate = async (e, shouldSeek = false) => {
+        if (currentInputMode !== 'file') return;
+        if (!window.electron) return;
         const rect = progressContainer.getBoundingClientRect();
         // Ensure offsetX is within valid bounds
         const offsetX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
@@ -951,6 +1079,77 @@ class WebNowPlayingAdapter {
   eqPresetSelect.addEventListener('change', (e) => {
        applyEqPreset(e.target.value);
   });
+
+  const populateCaptureDevices = async () => {
+      if (!window.electron || !captureDeviceSelect) return;
+      const result = await window.electron.invoke('music-get-capture-devices');
+      const devices = result && result.devices ? result.devices : [];
+      captureDeviceSelect.innerHTML = '';
+      if (!devices.length) {
+          const option = document.createElement('option');
+          option.value = 'default';
+          option.textContent = 'default';
+          captureDeviceSelect.appendChild(option);
+          return;
+      }
+      devices.forEach((device) => {
+          const option = document.createElement('option');
+          option.value = device.id;
+          option.textContent = device.name || device.id;
+          captureDeviceSelect.appendChild(option);
+      });
+  };
+
+  const startStream = async () => {
+      if (!window.electron || !streamUrlInput) return;
+      const url = streamUrlInput.value.trim();
+      if (!url) return;
+      setInputMode('stream');
+      trackTitle.textContent = '流媒体播放';
+      trackArtist.textContent = url;
+      trackBitrate.textContent = '';
+      const result = await window.electron.invoke('music-load-stream', { url });
+      if (result.status === 'success') {
+          await window.electron.invoke('music-play');
+      }
+  };
+
+  const stopStream = async () => {
+      if (!window.electron) return;
+      await window.electron.invoke('music-stop');
+  };
+
+  const startCapture = async () => {
+      if (!window.electron) return;
+      setInputMode('capture');
+      trackTitle.textContent = '系统捕获';
+      trackArtist.textContent = 'LIVE';
+      trackBitrate.textContent = '';
+      const device_id = captureDeviceSelect ? captureDeviceSelect.value : 'default';
+      const result = await window.electron.invoke('music-capture-start', { device_id });
+      if (result.status === 'success') {
+          await window.electron.invoke('music-play');
+      }
+  };
+
+  const stopCapture = async () => {
+      if (!window.electron) return;
+      await window.electron.invoke('music-capture-stop');
+  };
+
+  const setupSourceControls = () => {
+      if (!inputSourceSelect) return;
+      inputSourceSelect.addEventListener('change', async () => {
+          if (currentInputMode !== inputSourceSelect.value) {
+              await window.electron.invoke('music-stop');
+          }
+          setInputMode(inputSourceSelect.value);
+      });
+      if (streamStartBtn) streamStartBtn.addEventListener('click', startStream);
+      if (streamStopBtn) streamStopBtn.addEventListener('click', stopStream);
+      if (captureStartBtn) captureStartBtn.addEventListener('click', startCapture);
+      if (captureStopBtn) captureStopBtn.addEventListener('click', stopCapture);
+  };
 
    // --- Electron IPC and Initialization ---
     const setupElectronHandlers = () => {
@@ -1301,9 +1500,11 @@ class WebNowPlayingAdapter {
 
 
         setupElectronHandlers();
+        setupSourceControls();
         setupMediaSessionHandlers(); // Setup OS media controls
         updateModeButton();
         await initializeTheme();
+        connectEngineSocket();
         
         // Setup phantom audio
         try {
@@ -1332,10 +1533,12 @@ class WebNowPlayingAdapter {
        
        // --- New: Populate devices and set initial state ---
        await populateDeviceList();
+       await populateCaptureDevices();
       createEqBands(); // Create EQ sliders
       populateEqPresets(); // Populate EQ presets
        const initialDeviceState = await window.electron.invoke('music-get-state');
        if (initialDeviceState && initialDeviceState.state) {
+           setInputMode(initialDeviceState.state.mode || 'file');
            currentDeviceId = initialDeviceState.state.device_id;
            useWasapiExclusive = initialDeviceState.state.exclusive_mode;
            deviceSelect.value = currentDeviceId === null ? 'default' : currentDeviceId;
