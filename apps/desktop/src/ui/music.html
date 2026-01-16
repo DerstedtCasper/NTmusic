@@ -2,17 +2,14 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>音乐播放器</title>
-    <!-- 确保主样式表在插件样式表之前加载 -->
-    <link rel="stylesheet" href="../style.css"> 
+    <title>NTmusic</title>
+    <link rel="stylesheet" href="../style.css">
     <link rel="stylesheet" href="music.css">
 </head>
 <body>
-    <!-- Phantom audio element to enable Media Session API -->
     <audio id="phantom-audio" loop style="display:none;"></audio>
-<!-- Custom Title Bar -->
     <div id="custom-title-bar">
-        <div class="title">VCP - 音乐播放器</div>
+        <div class="title">NTmusic</div>
         <div class="window-controls">
             <button id="minimize-music-btn" class="window-control-btn" title="最小化">
                 <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1.2"></line></svg>
@@ -25,100 +22,31 @@
             </button>
         </div>
     </div>
-    <!-- 用于显示模糊专辑封面的背景 -->
     <div id="player-background"></div>
 
-    <div class="music-player-container">
-        <div class="main-content">
-            <!-- 上方的播放器核心控制区 -->
-            <div class="music-player glass-panel">
-                <div class="track-info">
-                    <div class="album-art-wrapper">
-                        <div class="album-art"></div>
-                    </div>
-                    <div class="track-details">
-                        <div class="track-title">未选择歌曲</div>
-                        <div class="track-artist">未知艺术家</div>
-                        <div class="track-bitrate"></div>
-                    </div>
-                    <button id="share-btn" class="control-btn" title="分享当前音频">
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M18 16.08C17.24 16.08 16.56 16.38 16.04 16.85L8.91 12.7C8.96 12.47 9 12.24 9 12C9 11.76 8.96 11.53 8.91 11.3L16.04 7.15C16.56 7.62 17.24 7.92 18 7.92C19.66 7.92 21 6.58 21 4.92C21 3.26 19.66 1.92 18 1.92C16.34 1.92 15 3.26 15 4.92C15 5.16 15.04 5.39 15.09 5.61L7.96 9.75C7.44 9.28 6.76 8.98 6 8.98C4.34 8.98 3 10.32 3 11.98C3 13.64 4.34 14.98 6 14.98C6.76 14.98 7.44 14.68 7.96 14.21L15.09 18.35C15.04 18.57 15 18.8 15 19.04C15 20.7 16.34 22.04 18 22.04C19.66 22.04 21 20.7 21 19.04C21 17.38 19.66 16.08 18 16.08Z" fill="currentColor"/></svg>
-                    </button>
+    <div class="app-shell">
+        <aside class="sidebar panel">
+            <div class="brand">
+                <div class="brand-mark">
+                    <img src="../../assets/ntmusic-default.png" alt="NTmusic">
                 </div>
-
-                <div class="source-bar">
-                    <div class="source-select">
-                        <label for="input-source">输入源</label>
-                        <select id="input-source">
-                            <option value="file">本地文件</option>
-                            <option value="stream">流媒体 URL</option>
-                            <option value="capture">系统捕获</option>
-                        </select>
-                    </div>
-                    <div class="source-status">
-                        <span id="live-indicator" class="live-indicator" hidden>LIVE</span>
-                        <span id="stream-status" class="stream-status"></span>
-                        <span id="buffer-status" class="buffer-status"></span>
-                    </div>
-                </div>
-                <div id="stream-controls" class="source-controls">
-                    <input id="stream-url" type="text" placeholder="输入流媒体 URL">
-                    <button id="stream-start-btn" class="control-btn small-btn">启动</button>
-                    <button id="stream-stop-btn" class="control-btn small-btn">停止</button>
-                </div>
-                <div id="capture-controls" class="source-controls">
-                    <select id="capture-device"></select>
-                    <button id="capture-start-btn" class="control-btn small-btn">开始</button>
-                    <button id="capture-stop-btn" class="control-btn small-btn">停止</button>
-                </div>
-
-                <div class="progress-section">
-                    <canvas id="visualizer"></canvas>
-                    <div class="progress-container">
-                        <div class="progress-bar">
-                            <div class="progress"></div>
-                        </div>
-                    </div>
-                    <div class="time-display">
-                        <span class="current-time">0:00</span>
-                        <span class="duration">0:00</span>
-                    </div>
-                </div>
-
-                <div class="controls">
-                    <button id="mode-btn" class="control-btn icon-btn"></button>
-                    <button id="prev-btn" class="control-btn">
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M19 5V19L12 12L19 5Z" fill="currentColor"/><path d="M5 5H7V19H5V5Z" fill="currentColor"/></svg>
-                    </button>
-                    <button id="play-pause-btn" class="control-btn play-btn">
-                        <svg class="play-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 5V19L19 12L8 5Z" fill="currentColor"/></svg>
-                        <svg class="pause-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 19H10V5H6V19ZM14 5V19H18V5H14Z" fill="currentColor"/></svg>
-                    </button>
-                    <button id="next-btn" class="control-btn">
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 5V19L12 12L5 5Z" fill="currentColor"/><path d="M17 5H19V19H17V5Z" fill="currentColor" /></svg>
-                    </button>
-                    <div class="volume-control">
-                        <button id="volume-btn" class="control-btn">
-                            <svg class="volume-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.03C15.48 15.29 16.5 13.77 16.5 12Z" fill="currentColor"/><path d="M14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z" fill="currentColor"/></svg>
-                            <svg class="mute-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M16.5 12C16.5 10.23 15.48 8.71 14 7.97V10.18L16.45 12.63C16.48 12.43 16.5 12.21 16.5 12ZM19 12C19 12.94 18.8 13.82 18.46 14.64L19.97 16.15C20.62 14.91 21 13.5 21 12C21 7.72 18.01 4.14 14 3.23V5.29C16.89 6.15 19 8.83 19 12ZM1.27 4.27L3 6.01V15H7L12 20V13.28L14.73 16.01C14.5 16.02 14.25 16.03 14 16.03V18.71C14.73 18.71 15.43 18.58 16.08 18.33L18.73 20.98L20 19.71L4.27 3L3 4.27L12 13.27V4L7 9H3V6.01L1.27 4.27ZM12 4L9.91 6.09L12 8.18V4Z" fill="currentColor"/></svg>
-                        </button>
-                        <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="1">
-                    </div>
+                <div class="brand-text">
+                    <div class="brand-name">NTmusic</div>
+                    <div class="brand-subtitle">本地高品质播放器</div>
                 </div>
             </div>
 
-            <!-- 下方的播放列表区 -->
-            <div class="playlist-container glass-panel">
-                <div class="playlist-header">
-                    <h3>播放列表</h3>
-                    <div class="playlist-actions">
-                        <input type="text" id="search-input" placeholder="搜索...">
-                        <button id="add-folder-btn">添加</button>
-                    </div>
-                </div>
-                <ul id="playlist" class="playlist">
-                    <!-- 播放列表项将由 JS 动态生成 -->
-                </ul>
+            <nav class="nav">
+                <button class="nav-item active">首页</button>
+                <button class="nav-item">搜索</button>
+                <button class="nav-item">本地库</button>
+                <button class="nav-item">收藏</button>
+            </nav>
+
+            <div class="sidebar-section">
+                <div class="section-title">导入</div>
+                <button id="add-folder-btn" class="primary-btn">导入文件夹</button>
+                <input type="text" id="search-input" placeholder="搜索本地库">
                 <div id="loading-indicator" class="loading-indicator" style="display: none;">
                     <div class="spinner"></div>
                     <div class="loading-text">
@@ -130,11 +58,89 @@
                     </div>
                 </div>
             </div>
-        </div>
 
-        <div class="right-sidebar">
-            <div class="settings-container glass-panel">
-                <!-- 顶部：音频设备 (单独一行，因为设备名可能很长) -->
+            <div class="sidebar-section">
+                <div class="section-title">输入源</div>
+                <div class="source-select">
+                    <label for="input-source">来源</label>
+                    <select id="input-source">
+                        <option value="file">本地文件</option>
+                        <option value="stream">流媒体 URL</option>
+                        <option value="capture">系统捕获</option>
+                    </select>
+                </div>
+                <div class="source-status">
+                    <span id="live-indicator" class="live-indicator" hidden>LIVE</span>
+                    <span id="stream-status" class="stream-status"></span>
+                    <span id="buffer-status" class="buffer-status"></span>
+                </div>
+                <div id="stream-controls" class="source-controls">
+                    <input id="stream-url" type="text" placeholder="输入流媒体 URL">
+                    <button id="stream-start-btn" class="ghost-btn">启动</button>
+                    <button id="stream-stop-btn" class="ghost-btn">停止</button>
+                </div>
+                <div id="capture-controls" class="source-controls">
+                    <select id="capture-device"></select>
+                    <button id="capture-start-btn" class="ghost-btn">开始</button>
+                    <button id="capture-stop-btn" class="ghost-btn">停止</button>
+                </div>
+            </div>
+        </aside>
+
+        <main class="content">
+            <section class="hero panel">
+                <div class="track-info">
+                    <div class="album-art-wrapper">
+                        <div class="album-art"></div>
+                    </div>
+                    <div class="track-details">
+                        <div class="track-title">未选择歌曲</div>
+                        <div class="track-artist">未知艺术家</div>
+                        <div class="track-bitrate"></div>
+                        <div class="track-meta">
+                            <span class="chip">Hi-Res Ready</span>
+                            <span class="chip accent">Engine Connected</span>
+                        </div>
+                    </div>
+                    <button id="share-btn" class="icon-btn" title="分享当前音频">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M18 16.08C17.24 16.08 16.56 16.38 16.04 16.85L8.91 12.7C8.96 12.47 9 12.24 9 12C9 11.76 8.96 11.53 8.91 11.3L16.04 7.15C16.56 7.62 17.24 7.92 18 7.92C19.66 7.92 21 6.58 21 4.92C21 3.26 19.66 1.92 18 1.92C16.34 1.92 15 3.26 15 4.92C15 5.16 15.04 5.39 15.09 5.61L7.96 9.75C7.44 9.28 6.76 8.98 6 8.98C4.34 8.98 3 10.32 3 11.98C3 13.64 4.34 14.98 6 14.98C6.76 14.98 7.44 14.68 7.96 14.21L15.09 18.35C15.04 18.57 15 18.8 15 19.04C15 20.7 16.34 22.04 18 22.04C19.66 22.04 21 20.7 21 19.04C21 17.38 19.66 16.08 18 16.08Z" fill="currentColor"/></svg>
+                    </button>
+                </div>
+                <div class="hero-actions">
+                    <div class="hero-actions-left">
+                        <div class="mode-pill">播放模式</div>
+                        <button id="mode-btn" class="mode-icon-btn"></button>
+                    </div>
+                    <div class="hero-actions-right">
+                        <span class="buffer-status" id="buffer-status-hero"></span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="playlist-section panel">
+                <div class="playlist-header">
+                    <h3>播放队列</h3>
+                    <div class="playlist-actions">
+                        <button class="ghost-btn" id="quick-import-btn" data-action="import">快速导入</button>
+                    </div>
+                </div>
+                <ul id="playlist" class="playlist"></ul>
+            </section>
+        </main>
+
+        <aside class="inspector">
+            <div class="inspector-header panel">
+                <div class="inspector-title">
+                    <div class="section-title">控制中心</div>
+                    <div class="section-subtitle">Beginner / Pro</div>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="ui-mode-toggle">
+                    <span class="slider round"></span>
+                </label>
+            </div>
+
+            <div class="panel settings-container">
                 <div class="setting-row full-width">
                     <label for="device-select">音频设备</label>
                     <select id="device-select"></select>
@@ -142,9 +148,7 @@
 
                 <div class="divider"></div>
 
-                <!-- 中部：紧凑网格布局 -->
                 <div class="settings-grid">
-                    <!-- 升频模式 -->
                     <div class="setting-item">
                         <label for="upsampling-select">升频</label>
                         <select id="upsampling-select" class="compact-select">
@@ -154,7 +158,6 @@
                         </select>
                     </div>
 
-                    <!-- WASAPI -->
                     <div class="setting-item toggle-item">
                         <label for="wasapi-switch">独占模式</label>
                         <label class="switch compact">
@@ -163,8 +166,7 @@
                         </label>
                     </div>
 
-                    <!-- Dither -->
-                    <div class="setting-item toggle-item">
+                    <div class="setting-item toggle-item pro-only">
                         <label for="dither-switch">抖动处理</label>
                         <label class="switch compact">
                             <input type="checkbox" id="dither-switch" checked>
@@ -172,8 +174,8 @@
                         </label>
                     </div>
 
-                    <div class="setting-item">
-                        <label for="dither-type-select">Dither Type</label>
+                    <div class="setting-item pro-only">
+                        <label for="dither-type-select">Dither</label>
                         <select id="dither-type-select" class="compact-select">
                             <option value="off">Off</option>
                             <option value="tpdf16">TPDF 16</option>
@@ -181,8 +183,7 @@
                         </select>
                     </div>
 
-                    <!-- ReplayGain -->
-                    <div class="setting-item toggle-item">
+                    <div class="setting-item toggle-item pro-only">
                         <label for="replaygain-switch">动态增益</label>
                         <label class="switch compact">
                             <input type="checkbox" id="replaygain-switch" checked>
@@ -190,7 +191,7 @@
                         </label>
                     </div>
 
-                    <div class="setting-item">
+                    <div class="setting-item pro-only">
                         <label for="resampler-select">Resampler</label>
                         <select id="resampler-select" class="compact-select">
                             <option value="auto">Auto</option>
@@ -198,7 +199,7 @@
                             <option value="soxr">Soxr</option>
                         </select>
                     </div>
-                    <div class="setting-item">
+                    <div class="setting-item pro-only">
                         <label for="soxr-status">Soxr</label>
                         <span id="soxr-status" class="status-chip">Unknown</span>
                     </div>
@@ -206,8 +207,7 @@
 
                 <div class="divider"></div>
 
-                <!-- 底部：EQ 部分 -->
-                <div id="eq-section" class="eq-section">
+                <div id="eq-section" class="eq-section pro-only">
                     <div class="eq-header">
                         <div class="eq-title-group">
                             <h4>均衡器</h4>
@@ -216,31 +216,62 @@
                                 <span class="slider round"></span>
                             </label>
                         </div>
-                        
+
                         <div class="eq-controls-row">
                             <select id="eq-type-select" class="eq-type-select">
                                 <option value="IIR">IIR (低延迟)</option>
                                 <option value="FIR">FIR (线性)</option>
                             </select>
-                            <select id="eq-preset-select" class="eq-preset-select">
-                                <!-- Presets populated by JS -->
-                            </select>
+                            <select id="eq-preset-select" class="eq-preset-select"></select>
                         </div>
                     </div>
-                    <div id="eq-bands" class="eq-bands">
-                        <!-- EQ Bands generated by JS -->
-                    </div>
+                    <div id="eq-bands" class="eq-bands"></div>
                 </div>
             </div>
-            <div id="lyrics-container" class="lyrics-container glass-panel">
-                <!-- 歌词渲染区域 -->
+
+            <div id="lyrics-container" class="panel lyrics-container">
                 <ul id="lyrics-list">
                     <li class="no-lyrics">暂无歌词</li>
                 </ul>
             </div>
-        </div>
+        </aside>
     </div>
-    <!-- 确保 JS 在 body 结束前加载 -->
+
+    <footer class="player-bar">
+        <div class="progress-section">
+            <canvas id="visualizer"></canvas>
+            <div class="progress-container">
+                <div class="progress-bar">
+                    <div class="progress"></div>
+                </div>
+            </div>
+            <div class="time-display">
+                <span class="current-time">0:00</span>
+                <span class="duration">0:00</span>
+            </div>
+        </div>
+        <div class="controls">
+            <button id="mode-btn-duplicate" class="control-btn icon-btn" aria-hidden="true" hidden></button>
+            <button id="prev-btn" class="control-btn">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M19 5V19L12 12L19 5Z" fill="currentColor"/><path d="M5 5H7V19H5V5Z" fill="currentColor"/></svg>
+            </button>
+            <button id="play-pause-btn" class="control-btn play-btn">
+                <svg class="play-icon" width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M8 5V19L19 12L8 5Z" fill="currentColor"/></svg>
+                <svg class="pause-icon" width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M6 19H10V5H6V19ZM14 5V19H18V5H14Z" fill="currentColor"/></svg>
+            </button>
+            <button id="next-btn" class="control-btn">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M5 5V19L12 12L5 5Z" fill="currentColor"/><path d="M17 5H19V19H17V5Z" fill="currentColor" /></svg>
+            </button>
+            <div class="volume-control">
+                <button id="volume-btn" class="control-btn">
+                    <svg class="volume-icon" width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M3 9V15H7L12 20V4L7 9H3ZM16.5 12C16.5 10.23 15.48 8.71 14 7.97V16.03C15.48 15.29 16.5 13.77 16.5 12Z" fill="currentColor"/><path d="M14 3.23V5.29C16.89 6.15 19 8.83 19 12C19 15.17 16.89 17.85 14 18.71V20.77C18.01 19.86 21 16.28 21 12C21 7.72 18.01 4.14 14 3.23Z" fill="currentColor"/></svg>
+                    <svg class="mute-icon" width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M16.5 12C16.5 10.23 15.48 8.71 14 7.97V10.18L16.45 12.63C16.48 12.43 16.5 12.21 16.5 12ZM19 12C19 12.94 18.8 13.82 18.46 14.64L19.97 16.15C20.62 14.91 21 13.5 21 12C21 7.72 18.01 4.14 14 3.23V5.29C16.89 6.15 19 8.83 19 12ZM1.27 4.27L3 6.01V15H7L12 20V13.28L14.73 16.01C14.5 16.02 14.25 16.03 14 16.03V18.71C14.73 18.71 15.43 18.58 16.08 18.33L18.73 20.98L20 19.71L4.27 3L3 4.27L12 13.27V4L7 9H3V6.01L1.27 4.27ZM12 4L9.91 6.09L12 8.18V4Z" fill="currentColor"/></svg>
+                </button>
+                <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="1">
+            </div>
+        </div>
+    </footer>
+
     <script src="music.js"></script>
 </body>
 </html>

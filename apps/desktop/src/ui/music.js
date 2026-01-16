@@ -19,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const trackBitrate = document.querySelector('.track-bitrate');
     const playlistEl = document.getElementById('playlist');
     const addFolderBtn = document.getElementById('add-folder-btn');
+    const quickImportBtn = document.getElementById('quick-import-btn');
     const searchInput = document.getElementById('search-input');
     const loadingIndicator = document.getElementById('loading-indicator');
     const scanProgressContainer = document.querySelector('.scan-progress-container');
@@ -40,6 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const liveIndicator = document.getElementById('live-indicator');
     const streamStatusEl = document.getElementById('stream-status');
     const bufferStatusEl = document.getElementById('buffer-status');
+    const bufferStatusHero = document.getElementById('buffer-status-hero');
    // --- New UI Elements for WASAPI ---
    const deviceSelect = document.getElementById('device-select');
    const wasapiSwitch = document.getElementById('wasapi-switch');
@@ -56,6 +58,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const soxrStatus = document.getElementById('soxr-status');
   const lyricsContainer = document.getElementById('lyrics-container');
   const lyricsList = document.getElementById('lyrics-list');
+  const uiModeToggle = document.getElementById('ui-mode-toggle');
 
   const phantomAudio = document.getElementById('phantom-audio');
  
@@ -108,12 +111,17 @@ document.addEventListener('DOMContentLoaded', () => {
             // ignore
         }
     };
+
+    const applyUiMode = () => {
+        if (!uiModeToggle) return;
+        document.body.classList.toggle('mode-pro', uiModeToggle.checked);
+    };
     let lyricSpeedFactor = 1.0; // Should be 1.0 for correctly timed LRC files.
     let lastKnownCurrentTime = 0;
     let lastStateUpdateTime = 0;
     let lastKnownDuration = 0;
     let wnpAdapter; // Rainmeter WebNowPlaying Adapter
-    let visualizerColor = { r: 118, g: 106, b: 226 };
+    let visualizerColor = { r: 29, g: 185, b: 84 };
     let statePollInterval; // 用于轮询状态的定时器
    let currentDeviceId = null;
    let useWasapiExclusive = false;
@@ -330,6 +338,7 @@ let isDraggingProgress = false;
         if (!isLive) {
             if (streamStatusEl) streamStatusEl.textContent = '';
             if (bufferStatusEl) bufferStatusEl.textContent = '';
+            if (bufferStatusHero) bufferStatusHero.textContent = '';
         }
     };
 
@@ -347,9 +356,11 @@ let isDraggingProgress = false;
         if (!bufferStatusEl) return;
         if (!payload || typeof payload.buffered_ms !== 'number') {
             bufferStatusEl.textContent = '';
+            if (bufferStatusHero) bufferStatusHero.textContent = '';
             return;
         }
         bufferStatusEl.textContent = `缓冲 ${Math.round(payload.buffered_ms)}ms`;
+        if (bufferStatusHero) bufferStatusHero.textContent = bufferStatusEl.textContent;
     };
 
     const updateSoxrIndicator = (available) => {
@@ -1314,6 +1325,10 @@ class WebNowPlayingAdapter {
     const setupElectronHandlers = () => {
         if (!window.electron) return;
 
+        if (quickImportBtn && addFolderBtn) {
+            quickImportBtn.addEventListener('click', () => addFolderBtn.click());
+        }
+
         addFolderBtn.addEventListener('click', () => {
             loadingIndicator.style.display = 'flex';
             scanProgressContainer.style.display = 'none';
@@ -1662,6 +1677,10 @@ class WebNowPlayingAdapter {
         // --- Initialize Particles ---
         recreateParticles();
 
+        if (uiModeToggle) {
+            uiModeToggle.addEventListener('change', applyUiMode);
+        }
+        applyUiMode();
 
         setupElectronHandlers();
         setupSourceControls();
