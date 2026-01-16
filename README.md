@@ -15,5 +15,10 @@ NTmusic 是一个基于 Rust 引擎的独立音频播放器项目，源自 VCPCh
 - **engine/bin**：运行时依赖（如 `ffmpeg.exe`、`soxr` 等）。
 - **AppData**：播放列表、封面、歌词等运行数据（不入库）。
 
+## 下载与运行
+- **便携版**：到 GitHub Releases 下载 `NTmusic-0.1.0-win.zip`，解压后直接运行根目录 `NTmusic.exe`。
+- **安装版**：到 GitHub Releases 下载 `NTmusic Setup 0.1.0.exe`，安装后从开始菜单启动。
+- **注意**：仓库页面的 “Code → Download ZIP” 是源码包，不包含可执行程序。
+
 ## 开发定位
 这个仓库是“播放器骨架 + 高性能引擎”的独立形态，不追求与旧版 100% 功能一致；优先保证结构清晰、可扩展和工程可维护。

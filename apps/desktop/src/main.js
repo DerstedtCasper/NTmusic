@@ -37,6 +37,11 @@ function getAppRoot() {
     return app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', '..');
 }
 
+function getInstallRoot() {
+    if (!app.isPackaged) return getAppRoot();
+    return path.dirname(process.execPath);
+}
+
 function getAppDataRoot() {
     return app.isPackaged ? app.getPath('userData') : path.join(getAppRoot(), 'AppData');
 }
@@ -52,8 +57,12 @@ function getNtaDir() {
 function resolveEngineBinary() {
     const executable = process.platform === 'win32' ? 'vmusic_engine.exe' : 'vmusic_engine';
     const appRoot = getAppRoot();
+    const installRoot = getInstallRoot();
     const candidates = app.isPackaged
-        ? [path.join(process.resourcesPath, 'engine', executable)]
+        ? [
+              path.join(installRoot, 'engine', executable),
+              path.join(process.resourcesPath, 'engine', executable)
+          ]
         : [
               path.join(appRoot, 'engine', 'bin', executable),
               path.join(appRoot, 'engine', 'rust', 'vmusic_engine', 'target', 'release', executable),

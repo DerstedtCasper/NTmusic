@@ -33,19 +33,26 @@
     ],
     "extraResources": [
       {
-        "from": "../../engine/bin",
-        "to": "engine",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
         "from": "../../engine/rust/ntmusic_core/target/release/ntmusic_core.node",
         "to": "native/ntmusic_core.node"
       }
     ],
+    "extraFiles": [
+      {
+        "from": "../../engine/bin",
+        "to": "engine"
+      },
+      {
+        "from": "../../engine/rust/vmusic_engine/target/release/vmusic_engine.exe",
+        "to": "engine/vmusic_engine.exe"
+      }
+    ],
     "win": {
-      "icon": "assets/icon.png"
+      "icon": "assets/icon.png",
+      "target": [
+        "nsis",
+        "zip"
+      ]
     }
   }
 }
