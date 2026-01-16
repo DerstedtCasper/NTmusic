@@ -1,37 +1,37 @@
-# VMusic Rust wheel 黑盒探针
+﻿# NTmusic Rust wheel 黑盒探针
 ## 1. 作用
 - 黑盒加载 `rust_audio_resampler` wheel，枚举导出并做最小烟雾测试。
 - 用于验证 wheel 与 Python 引擎调用约定是否匹配，发现缺失接口或签名异常。
 
 ## 2. 运行方式
 默认会在常见目录自动寻找 `rust_audio_resampler-*.whl`：
-- `vmusic/engine/python/wheels`
-- `vmusic/engine/python`
+- `NTmusic/packages/audio-core/python/wheels`
+- `NTmusic/packages/audio-core/python`
 - `D:\AI bot\VCPChat\audio_engine`
 
 常用命令：
 ```powershell
-python D:\AI bot\vmusic\tools\wheel_probe.py
+python D:\\AI bot\\NTmusic\\tools\wheel_probe.py
 ```
 
 指定 wheel 路径：
 ```powershell
-python D:\AI bot\vmusic\tools\wheel_probe.py --wheel "D:\AI bot\VCPChat\audio_engine\rust_audio_resampler-0.1.0-cp313-cp313-win_amd64.whl"
+python D:\\AI bot\\NTmusic\\tools\wheel_probe.py --wheel "D:\AI bot\VCPChat\audio_engine\rust_audio_resampler-0.1.0-cp313-cp313-win_amd64.whl"
 ```
 
 输出 JSON 到文件：
 ```powershell
-python D:\AI bot\vmusic\tools\wheel_probe.py --json "D:\AI bot\vmusic\tools\wheel_probe_report.json"
+python D:\\AI bot\\NTmusic\\tools\wheel_probe.py --json "D:\\AI bot\\NTmusic\\tools\wheel_probe_report.json"
 ```
 
 若环境没有 numpy，默认会跳过烟雾测试：
 ```powershell
-python D:\AI bot\vmusic\tools\wheel_probe.py --no-tests
+python D:\\AI bot\\NTmusic\\tools\wheel_probe.py --no-tests
 ```
 
 强制要求 numpy（缺失则报告失败）：
 ```powershell
-python D:\AI bot\vmusic\tools\wheel_probe.py --require-numpy
+python D:\\AI bot\\NTmusic\\tools\wheel_probe.py --require-numpy
 ```
 
 ## 3. 输出说明

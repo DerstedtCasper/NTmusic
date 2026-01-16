@@ -1,4 +1,4 @@
----
+﻿---
 mode: auto
 cwd: d:\AI bot\NTmusic
 task: NTmusic Engine Gateway + Store 迁移
@@ -18,15 +18,15 @@ source: NTmusic与NT-A协议开发计划.md
 - 断线自动重连且有状态事件。
 
 ## 📦 变更范围
-- 新增 `apps/desktop/src/main/engineGateway.js`
-- 新增 `apps/desktop/src/main/ipc.js`
-- 新增 `apps/desktop/src/shared/events.js`
-- 新增 `apps/desktop/src/ui/store.js`
-- 修改 `apps/desktop/src/main.js`
-- 修改 `apps/desktop/src/preload.js`
-- 修改 `apps/desktop/src/ui/music.js`
-- 修改 `apps/desktop/src/ui/music.html`
-- 修改 `apps/desktop/package.json`
+- 新增 `apps/ntmusic-player/src/main/engineGateway.js`
+- 新增 `apps/ntmusic-player/src/main/ipc.js`
+- 新增 `apps/ntmusic-player/src/shared/events.js`
+- 新增 `apps/ntmusic-player/src/ui/store.js`
+- 修改 `apps/ntmusic-player/src/main.js`
+- 修改 `apps/ntmusic-player/src/preload.js`
+- 修改 `apps/ntmusic-player/src/ui/music.js`
+- 修改 `apps/ntmusic-player/src/ui/music.html`
+- 修改 `apps/ntmusic-player/package.json`
 
 ## 🧭 执行计划
 1. Main 建立 EngineGateway（WS 连接 + 事件转发 + 重连节流）。
@@ -36,7 +36,7 @@ source: NTmusic与NT-A协议开发计划.md
 5. 统一命令入口（engineCmd）接入网关。
 
 ## 🔍 验证方式
-- `apps/desktop`: `npm run pack`
+- `apps/ntmusic-player`: `npm run pack`
 
 ## ⚠️ 风险与备选
 - WS 事件频率过高导致 UI 抖动：Main 侧节流。

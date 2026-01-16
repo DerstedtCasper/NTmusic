@@ -10,9 +10,9 @@ NTmusic 是一个基于 Rust 引擎的独立音频播放器项目，源自 VCPCh
 - **Windows 优先**：先保障 Windows 体验，再推进跨平台。
 
 ## 项目概览
-- **apps/desktop**：Electron UI（播放器界面与交互）。
-- **engine/rust/vmusic_engine**：Rust 音频引擎（HTTP + WS）。
-- **engine/bin**：运行时依赖（如 `ffmpeg.exe`、`soxr` 等）。
+- **apps/ntmusic-player**：Electron UI（播放器界面与交互）。
+- **packages/audio-core/ntmusic_engine**：Rust 音频引擎（crate 名为 `ntmusic_engine`，HTTP + WS）。
+- **packages/audio-core/bin**：运行时依赖（如 `ffmpeg.exe`、`soxr` 等）。
 - **AppData**：播放列表、封面、歌词等运行数据（不入库）。
 
 ## 下载与运行
@@ -33,7 +33,7 @@ NTmusic 是一个基于 Rust 引擎的独立音频播放器项目，源自 VCPCh
 - **抖动处理**：支持 `TPDF` 以及 `TPDF NS1/NS2`（噪声整形）档位，可在 Pro 模式中选择 16/24bit。
 
 ### 新 UI 构建与入口
-- 构建命令：`apps/desktop` 下执行 `npm run build:renderer` 产出 `renderer-dist/`
+- 构建命令：`apps/ntmusic-player` 下执行 `npm run build:renderer` 产出 `renderer-dist/`
 - Electron 会优先加载 `renderer-dist/index.html`，无该目录时才回退 Legacy UI
 
 ## 开发定位

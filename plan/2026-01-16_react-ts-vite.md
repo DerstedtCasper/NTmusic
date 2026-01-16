@@ -1,4 +1,4 @@
----
+﻿---
 mode: auto
 cwd: d:\AI bot\NTmusic
 task: NTmusic React + TS + Vite Renderer 迁移
@@ -17,12 +17,12 @@ source: NTmusic与NT-A协议开发计划.md
 - 旧 UI 保留作为 fallback。
 
 ## 📦 变更范围
-- 新增 `apps/desktop/vite.config.ts`
-- 新增 `apps/desktop/tsconfig.json`
-- 新增 `apps/desktop/src/renderer/**`
-- 修改 `apps/desktop/src/main.js`
-- 修改 `apps/desktop/src/ipc/musicHandlers.js`
-- 修改 `apps/desktop/package.json`
+- 新增 `apps/ntmusic-player/vite.config.ts`
+- 新增 `apps/ntmusic-player/tsconfig.json`
+- 新增 `apps/ntmusic-player/src/renderer/**`
+- 修改 `apps/ntmusic-player/src/main.js`
+- 修改 `apps/ntmusic-player/src/ipc/musicHandlers.js`
+- 修改 `apps/ntmusic-player/package.json`
 
 ## 🧭 执行计划
 1. 添加 Vite/React/TS 构建链路与脚本。
@@ -31,7 +31,7 @@ source: NTmusic与NT-A协议开发计划.md
 4. 保留旧 UI 文件作为 fallback。
 
 ## 🔍 验证方式
-- `apps/desktop`: `npm run build:renderer`
+- `apps/ntmusic-player`: `npm run build:renderer`
 
 ## ⚠️ 风险与备选
 - 构建链路失效：保留旧 UI 入口。
