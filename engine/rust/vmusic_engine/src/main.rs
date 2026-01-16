@@ -49,6 +49,7 @@ struct SharedState {
     producer: Arc<Mutex<HeapProd<f32>>>,
     consumer: Arc<Mutex<HeapCons<f32>>>,
     output_stream: Arc<Mutex<OutputStreamHolder>>,
+    output_scratch: Arc<Mutex<Vec<f32>>>,
     stream_process: Arc<Mutex<Option<Child>>>,
     stream_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     spectrum_shared: Option<Arc<Mutex<SpectrumShared>>>,
@@ -78,6 +79,10 @@ const SPECTRUM_UPDATE_INTERVAL_MS: u64 = 50;
 const SPECTRUM_HEADER_BYTES: usize = std::mem::size_of::<u32>();
 const CONTROL_HEADER_BYTES: usize = 16;
 const CONTROL_CMD_BYTES: usize = 16;
+const MAX_DITHER_CHANNELS: usize = 8;
+const DITHER_SHAPER_ORDER1_COEFF: f32 = 1.0;
+const DITHER_SHAPER_ORDER2_COEFF1: f32 = 2.0;
+const DITHER_SHAPER_ORDER2_COEFF2: f32 = -1.0;
 
 const CONTROL_CMD_PLAY: u32 = 1;
 const CONTROL_CMD_PAUSE: u32 = 2;
@@ -185,6 +190,8 @@ struct PlaybackState {
     resampler_mode: String,
     resampler_quality: String,
     soxr_available: bool,
+    limiter_enabled: bool,
+    limiter_threshold: f32,
     eq_enabled: bool,
     eq_bands: HashMap<String, f32>,
     target_samplerate: Option<u32>,
@@ -220,6 +227,8 @@ struct EngineState {
     resampler_mode: String,
     resampler_quality: String,
     soxr_available: bool,
+    limiter_enabled: bool,
+    limiter_threshold: f32,
     target_samplerate: Option<u32>,
     stream_url: Option<String>,
     stream_status: String,
@@ -229,6 +238,8 @@ struct EngineState {
     underrun_count: u64,
     last_output_chunk: Vec<f32>,
     dither_rng: u64,
+    dither_shape_err1: [f32; MAX_DITHER_CHANNELS],
+    dither_shape_err2: [f32; MAX_DITHER_CHANNELS],
     spectrum_ws_enabled: bool,
 }
 
@@ -287,6 +298,8 @@ struct OptimizeRequest {
     replaygain_enabled: Option<bool>,
     resampler_mode: Option<String>,
     resampler_quality: Option<String>,
+    limiter_enabled: Option<bool>,
+    limiter_threshold: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -640,6 +653,8 @@ fn initial_state() -> EngineState {
         resampler_mode: "auto".to_string(),
         resampler_quality: "hq".to_string(),
         soxr_available: detect_soxr_available(),
+        limiter_enabled: false,
+        limiter_threshold: 0.98,
         target_samplerate: None,
         stream_url: None,
         stream_status: "idle".to_string(),
@@ -649,6 +664,8 @@ fn initial_state() -> EngineState {
         underrun_count: 0,
         last_output_chunk: vec![0.0; SPECTRUM_FFT_SIZE],
         dither_rng: initial_dither_seed(),
+        dither_shape_err1: [0.0; MAX_DITHER_CHANNELS],
+        dither_shape_err2: [0.0; MAX_DITHER_CHANNELS],
         spectrum_ws_enabled: true,
     }
 }
@@ -692,6 +709,8 @@ fn build_state_view(state: &EngineState) -> PlaybackState {
         resampler_mode: state.resampler_mode.clone(),
         resampler_quality: state.resampler_quality.clone(),
         soxr_available: state.soxr_available,
+        limiter_enabled: state.limiter_enabled,
+        limiter_threshold: state.limiter_threshold,
         eq_enabled: state.eq_enabled,
         eq_bands: state.eq_bands.clone(),
         target_samplerate: state.target_samplerate,
@@ -962,11 +981,43 @@ fn normalize_resampler_quality(value: &str) -> String {
     }
 }
 
+fn should_prefer_soxr(resampler_mode: &str, quality: &str, soxr_available: bool) -> bool {
+    if resampler_mode == "soxr" {
+        return true;
+    }
+    if resampler_mode == "rubato" {
+        return false;
+    }
+    if !soxr_available {
+        return false;
+    }
+    !matches!(quality, "low" | "std")
+}
+
 fn normalize_dither_bits(bits: u32) -> u32 {
     match bits {
         16 | 24 => bits,
         _ => 24,
     }
+}
+
+fn normalize_limiter_threshold(value: f32) -> f32 {
+    value.clamp(0.7, 1.0)
+}
+
+fn normalize_dither_type(value: &str) -> String {
+    match value.to_lowercase().as_str() {
+        "off" => "off".to_string(),
+        "tpdf" => "tpdf".to_string(),
+        "tpdf_ns1" => "tpdf_ns1".to_string(),
+        "tpdf_ns2" => "tpdf_ns2".to_string(),
+        _ => "tpdf".to_string(),
+    }
+}
+
+fn reset_dither_shape_state(state: &mut EngineState) {
+    state.dither_shape_err1.fill(0.0);
+    state.dither_shape_err2.fill(0.0);
 }
 
 fn get_sinc_params(quality: &str, ratio: f64) -> SincInterpolationParameters {
@@ -1169,7 +1220,7 @@ fn resample_for_output(shared: &SharedState, target_rate: u32) -> Result<()> {
     }
 
     let quality = normalize_resampler_quality(&resampler_quality);
-    let prefer_soxr = resampler_mode == "soxr" || (resampler_mode == "auto" && soxr_available);
+    let prefer_soxr = should_prefer_soxr(&resampler_mode, &quality, soxr_available);
     let resampled = if prefer_soxr {
         match resample_audio_soxr(&data, channels, sample_rate, target_rate) {
             Ok(out) => out,
@@ -1221,23 +1272,110 @@ fn apply_tpdf_dither(samples: &mut [f32], bits: u32, seed: &mut u64) {
     }
 }
 
+fn quantize_to_step(value: f32, step: f32) -> f32 {
+    if step <= 0.0 {
+        return value;
+    }
+    let scaled = (value / step).round();
+    (scaled * step).clamp(-1.0, 1.0)
+}
+
+fn soft_limit_sample(sample: f32, threshold: f32) -> f32 {
+    let limit = normalize_limiter_threshold(threshold);
+    let abs = sample.abs();
+    if abs <= limit {
+        return sample;
+    }
+    let t = ((abs - limit) / (1.0 - limit)).min(1.0);
+    let shaped = limit + (1.0 - limit) * (t + t * t - t * t * t);
+    sample.signum() * shaped
+}
+
+fn apply_tpdf_dither_shaped(
+    samples: &mut [f32],
+    bits: u32,
+    channels: usize,
+    seed: &mut u64,
+    err1: &mut [f32; MAX_DITHER_CHANNELS],
+    err2: &mut [f32; MAX_DITHER_CHANNELS],
+    order: u8,
+) {
+    let effective_bits = bits.clamp(8, 32);
+    let denom = 1u64 << effective_bits.saturating_sub(1);
+    let lsb = 1.0 / denom as f32;
+    let channel_count = channels.max(1);
+    if channel_count > MAX_DITHER_CHANNELS || order == 0 {
+        apply_tpdf_dither(samples, effective_bits, seed);
+        return;
+    }
+    for (idx, sample) in samples.iter_mut().enumerate() {
+        let ch = idx % channel_count;
+        let feedback = if order == 1 {
+            DITHER_SHAPER_ORDER1_COEFF * err1[ch]
+        } else {
+            DITHER_SHAPER_ORDER2_COEFF1 * err1[ch] + DITHER_SHAPER_ORDER2_COEFF2 * err2[ch]
+        };
+        let shaped = *sample + feedback;
+        let noise = (next_uniform(seed) - next_uniform(seed)) * lsb;
+        let dithered = (shaped + noise).clamp(-1.0, 1.0);
+        let quantized = quantize_to_step(dithered, lsb);
+        let error = dithered - quantized;
+        err2[ch] = err1[ch];
+        err1[ch] = error;
+        *sample = quantized;
+    }
+}
+
 fn apply_dither_if_needed(state: &Arc<Mutex<EngineState>>, data: &mut [f32], target_bits: u32) {
-    let (enabled, dither_type, bits, mut seed) = {
+    let (enabled, dither_type, bits, mut seed, channels, mut err1, mut err2) = {
         let guard = state.lock().unwrap();
         (
             guard.dither_enabled,
             guard.dither_type.clone(),
             guard.dither_bits,
             guard.dither_rng,
+            guard.channels,
+            guard.dither_shape_err1,
+            guard.dither_shape_err2,
         )
     };
-    if !enabled || dither_type != "tpdf" {
+    if !enabled || dither_type == "off" {
         return;
     }
     let effective_bits = normalize_dither_bits(bits).min(target_bits);
-    apply_tpdf_dither(data, effective_bits, &mut seed);
+    match dither_type.as_str() {
+        "tpdf_ns1" => {
+            apply_tpdf_dither_shaped(
+                data,
+                effective_bits,
+                channels,
+                &mut seed,
+                &mut err1,
+                &mut err2,
+                1,
+            );
+        }
+        "tpdf_ns2" => {
+            apply_tpdf_dither_shaped(
+                data,
+                effective_bits,
+                channels,
+                &mut seed,
+                &mut err1,
+                &mut err2,
+                2,
+            );
+        }
+        _ => {
+            apply_tpdf_dither(data, effective_bits, &mut seed);
+        }
+    }
     let mut guard = state.lock().unwrap();
     guard.dither_rng = seed;
+    if dither_type == "tpdf_ns1" || dither_type == "tpdf_ns2" {
+        guard.dither_shape_err1 = err1;
+        guard.dither_shape_err2 = err2;
+    }
 }
 fn ensure_output_stream(shared: &SharedState) -> Result<()> {
     let mut guard = shared.output_stream.lock().unwrap();
@@ -1294,6 +1432,7 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
     let state = shared.inner.clone();
     let consumer = shared.consumer.clone();
     let control_shared = shared.control_shared.clone();
+    let output_scratch = shared.output_scratch.clone();
 
     let err_fn = |err| {
         error!("stream error: {}", err);
@@ -1311,10 +1450,13 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
         cpal::SampleFormat::I16 => device.build_output_stream(
             &config,
             move |data: &mut [i16], _| {
-                let mut temp = vec![0.0f32; data.len()];
-                fill_output_buffer(&state, &consumer, &control_shared, &mut temp);
-                apply_dither_if_needed(&state, &mut temp, 16);
-                for (dst, src) in data.iter_mut().zip(temp.iter()) {
+                let mut scratch = output_scratch.lock().unwrap();
+                if scratch.len() != data.len() {
+                    scratch.resize(data.len(), 0.0);
+                }
+                fill_output_buffer(&state, &consumer, &control_shared, &mut scratch);
+                apply_dither_if_needed(&state, &mut scratch, 16);
+                for (dst, src) in data.iter_mut().zip(scratch.iter()) {
                     *dst = cpal::Sample::from_sample(*src);
                 }
             },
@@ -1324,10 +1466,13 @@ fn ensure_output_stream(shared: &SharedState) -> Result<()> {
         cpal::SampleFormat::U16 => device.build_output_stream(
             &config,
             move |data: &mut [u16], _| {
-                let mut temp = vec![0.0f32; data.len()];
-                fill_output_buffer(&state, &consumer, &control_shared, &mut temp);
-                apply_dither_if_needed(&state, &mut temp, 16);
-                for (dst, src) in data.iter_mut().zip(temp.iter()) {
+                let mut scratch = output_scratch.lock().unwrap();
+                if scratch.len() != data.len() {
+                    scratch.resize(data.len(), 0.0);
+                }
+                fill_output_buffer(&state, &consumer, &control_shared, &mut scratch);
+                apply_dither_if_needed(&state, &mut scratch, 16);
+                for (dst, src) in data.iter_mut().zip(scratch.iter()) {
                     *dst = cpal::Sample::from_sample(*src);
                 }
             },
@@ -1406,6 +1551,12 @@ fn fill_output_buffer(
 
     for sample in data.iter_mut() {
         *sample *= local.volume;
+    }
+    if local.limiter_enabled {
+        let threshold = local.limiter_threshold;
+        for sample in data.iter_mut() {
+            *sample = soft_limit_sample(*sample, threshold);
+        }
     }
     if local.last_output_chunk.len() != SPECTRUM_FFT_SIZE {
         local.last_output_chunk.resize(SPECTRUM_FFT_SIZE, 0.0);
@@ -1547,7 +1698,7 @@ async fn load_handler(State(shared): State<SharedState>, Json(req): Json<LoadReq
         if target > 0 && target != sample_rate {
             let mode = normalize_resampler_mode(&resampler_mode);
             let quality = normalize_resampler_quality(&resampler_quality);
-            let prefer_soxr = mode == "soxr" || (mode == "auto" && soxr_available);
+            let prefer_soxr = should_prefer_soxr(&mode, &quality, soxr_available);
             if prefer_soxr {
                 match resample_audio_soxr(&final_data, channels, sample_rate, target) {
                     Ok(resampled) => {
@@ -1745,11 +1896,10 @@ async fn set_eq_type_handler(State(shared): State<SharedState>, Json(req): Json<
 async fn configure_opt_handler(State(shared): State<SharedState>, Json(req): Json<OptimizeRequest>) -> impl IntoResponse {
     let mut state = shared.inner.lock().unwrap();
     if let Some(value) = req.dither_type {
-        let normalized = match value.to_lowercase().as_str() {
-            "off" => "off".to_string(),
-            "tpdf" => "tpdf".to_string(),
-            _ => "tpdf".to_string(),
-        };
+        let normalized = normalize_dither_type(&value);
+        if normalized != state.dither_type {
+            reset_dither_shape_state(&mut state);
+        }
         state.dither_type = normalized.clone();
         if normalized == "off" {
             state.dither_enabled = false;
@@ -1762,6 +1912,7 @@ async fn configure_opt_handler(State(shared): State<SharedState>, Json(req): Jso
         state.dither_enabled = val;
         if !val {
             state.dither_type = "off".to_string();
+            reset_dither_shape_state(&mut state);
         } else if state.dither_type == "off" {
             state.dither_type = "tpdf".to_string();
         }
@@ -1774,6 +1925,12 @@ async fn configure_opt_handler(State(shared): State<SharedState>, Json(req): Jso
     }
     if let Some(value) = req.resampler_quality {
         state.resampler_quality = normalize_resampler_quality(&value);
+    }
+    if let Some(value) = req.limiter_enabled {
+        state.limiter_enabled = value;
+    }
+    if let Some(value) = req.limiter_threshold {
+        state.limiter_threshold = normalize_limiter_threshold(value);
     }
     state.soxr_available = detect_soxr_available();
     Json(json!({ "status": "success", "state": build_state_view(&state) }))
@@ -1960,6 +2117,7 @@ async fn main() -> Result<()> {
         producer: Arc::new(Mutex::new(producer)),
         consumer: Arc::new(Mutex::new(consumer)),
         output_stream: Arc::new(Mutex::new(OutputStreamHolder(None))),
+        output_scratch: Arc::new(Mutex::new(Vec::new())),
         stream_process: Arc::new(Mutex::new(None)),
         stream_thread: Arc::new(Mutex::new(None)),
         spectrum_shared,
@@ -1997,4 +2155,38 @@ async fn main() -> Result<()> {
     println!("VMUSIC_ENGINE_READY");
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_dither_type_accepts_shaped_variants() {
+        assert_eq!(normalize_dither_type("tpdf_ns1"), "tpdf_ns1");
+        assert_eq!(normalize_dither_type("TPDF_NS2"), "tpdf_ns2");
+        assert_eq!(normalize_dither_type("off"), "off");
+        assert_eq!(normalize_dither_type("unknown"), "tpdf");
+    }
+
+    #[test]
+    fn quantize_to_step_aligns_to_lsb() {
+        let step = 1.0 / 32768.0;
+        let out = quantize_to_step(0.123456, step);
+        let scaled = (out / step).round();
+        let reconstructed = scaled * step;
+        assert!((out - reconstructed).abs() < 1e-6);
+        assert!(out <= 1.0 && out >= -1.0);
+    }
+
+    #[test]
+    fn shaped_dither_advances_seed_and_bounds() {
+        let mut data = vec![0.0f32; 64];
+        let mut seed = 1u64;
+        let mut err1 = [0.0f32; MAX_DITHER_CHANNELS];
+        let mut err2 = [0.0f32; MAX_DITHER_CHANNELS];
+        apply_tpdf_dither_shaped(&mut data, 16, 2, &mut seed, &mut err1, &mut err2, 1);
+        assert_ne!(seed, 1u64);
+        assert!(data.iter().all(|v| *v <= 1.0 && *v >= -1.0));
+    }
 }

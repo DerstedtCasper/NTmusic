@@ -51,6 +51,24 @@ class EngineGateway {
         this.emit({ type: 'engine.status', connected, message });
     }
 
+    async refreshState() {
+        try {
+            const fetch = await this.ensureFetch();
+            const res = await fetch(`${this.engineUrl}/state`, { method: 'GET' });
+            if (!res.ok) return false;
+            const payload = await res.json().catch(() => null);
+            if (payload && payload.state) {
+                this.emit({ type: 'playback.state', state: payload.state });
+                this.emitStatus(true, 'state refreshed');
+                return true;
+            }
+            return false;
+        } catch (_err) {
+            // Silent fallback; WS reconnects are already handled.
+            return false;
+        }
+    }
+
     shouldEmit(type) {
         const limit = this.throttleMs[type];
         if (!limit) return true;
@@ -68,6 +86,7 @@ class EngineGateway {
 
         ws.on('open', () => {
             this.emitStatus(true, 'connected');
+            this.refreshState();
         });
 
         ws.on('message', (data) => {

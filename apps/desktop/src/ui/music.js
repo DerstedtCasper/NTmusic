@@ -55,6 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const replaygainSwitch = document.getElementById('replaygain-switch');
   const upsamplingSelect = document.getElementById('upsampling-select');
   const resamplerSelect = document.getElementById('resampler-select');
+  const resamplerQualitySelect = document.getElementById('resampler-quality-select');
   const soxrStatus = document.getElementById('soxr-status');
   const lyricsContainer = document.getElementById('lyrics-container');
   const lyricsList = document.getElementById('lyrics-list');
@@ -661,12 +662,7 @@ class WebNowPlayingAdapter {
           ditherSwitch.checked = state.dither_enabled;
       }
       if (ditherTypeSelect && !ditherTypeSelect.matches(':focus')) {
-          const ditherType = state.dither_type || (state.dither_enabled ? 'tpdf' : 'off');
-          const ditherBits = state.dither_bits || 24;
-          let desiredDither = 'off';
-          if (ditherType !== 'off' && state.dither_enabled !== false) {
-              desiredDither = ditherBits === 16 ? 'tpdf16' : 'tpdf24';
-          }
+          const desiredDither = resolveDitherChoice(state);
           if (ditherTypeSelect.value !== desiredDither) {
               ditherTypeSelect.value = desiredDither;
           }
@@ -676,6 +672,9 @@ class WebNowPlayingAdapter {
       }
       if (resamplerSelect && state.resampler_mode && resamplerSelect.value !== state.resampler_mode && !resamplerSelect.matches(':focus')) {
           resamplerSelect.value = state.resampler_mode;
+      }
+      if (resamplerQualitySelect && state.resampler_quality && resamplerQualitySelect.value !== state.resampler_quality && !resamplerQualitySelect.matches(':focus')) {
+          resamplerQualitySelect.value = state.resampler_quality;
       }
       if (state.soxr_available !== undefined) {
           updateSoxrIndicator(state.soxr_available);
@@ -1225,20 +1224,45 @@ class WebNowPlayingAdapter {
       }
   });
 
+  const resolveDitherChoice = (state) => {
+      const enabled = state.dither_enabled !== false;
+      const bits = state.dither_bits || 24;
+      const ditherType = (state.dither_type || (enabled ? 'tpdf' : 'off')).toLowerCase();
+      if (!enabled || ditherType === 'off') {
+          return 'off';
+      }
+      const bitSuffix = bits === 16 ? '16' : '24';
+      if (ditherType === 'tpdf_ns1') return `tpdf_ns1_${bitSuffix}`;
+      if (ditherType === 'tpdf_ns2') return `tpdf_ns2_${bitSuffix}`;
+      return `tpdf${bitSuffix}`;
+  };
+
+  const parseDitherChoice = (choice) => {
+      if (!choice || choice === 'off') {
+          return { enabled: false, type: 'off', bits: 24 };
+      }
+      if (choice.startsWith('tpdf_ns1_')) {
+          return { enabled: true, type: 'tpdf_ns1', bits: choice.endsWith('16') ? 16 : 24 };
+      }
+      if (choice.startsWith('tpdf_ns2_')) {
+          return { enabled: true, type: 'tpdf_ns2', bits: choice.endsWith('16') ? 16 : 24 };
+      }
+      return { enabled: true, type: 'tpdf', bits: choice === 'tpdf16' ? 16 : 24 };
+  };
+
   const updateOptimizations = async () => {
       if (!window.ntmusic && !window.electron) return;
       const ditherChoice = ditherTypeSelect ? ditherTypeSelect.value : (ditherSwitch.checked ? 'tpdf24' : 'off');
-      const ditherBits = ditherChoice === 'tpdf16' ? 16 : 24;
-      const ditherEnabled = ditherSwitch.checked && ditherChoice !== 'off';
-      const ditherType = ditherEnabled ? 'tpdf' : 'off';
+      const parsed = parseDitherChoice(ditherChoice);
+      const quality = resamplerQualitySelect ? resamplerQualitySelect.value : 'hq';
       const resamplerMode = resamplerSelect ? resamplerSelect.value : 'auto';
       await engineCmd('configure-optimizations', {
-          dither_enabled: ditherEnabled,
-          dither_type: ditherType,
-          dither_bits: ditherBits,
+          dither_enabled: ditherSwitch.checked && parsed.enabled,
+          dither_type: parsed.enabled ? parsed.type : 'off',
+          dither_bits: parsed.bits,
           replaygain_enabled: replaygainSwitch.checked,
           resampler_mode: resamplerMode,
-          resampler_quality: 'hq'
+          resampler_quality: quality
       });
   };
 
@@ -1257,6 +1281,9 @@ class WebNowPlayingAdapter {
   replaygainSwitch.addEventListener('change', updateOptimizations);
   if (resamplerSelect) {
       resamplerSelect.addEventListener('change', updateOptimizations);
+  }
+  if (resamplerQualitySelect) {
+      resamplerQualitySelect.addEventListener('change', updateOptimizations);
   }
 
   eqPresetSelect.addEventListener('change', (e) => {
@@ -1785,6 +1812,9 @@ class WebNowPlayingAdapter {
            }
            if (resamplerSelect && initialDeviceState.state.resampler_mode !== undefined) {
                resamplerSelect.value = initialDeviceState.state.resampler_mode;
+           }
+           if (resamplerQualitySelect && initialDeviceState.state.resampler_quality !== undefined) {
+               resamplerQualitySelect.value = initialDeviceState.state.resampler_quality;
            }
            if (initialDeviceState.state.soxr_available !== undefined) {
                updateSoxrIndicator(initialDeviceState.state.soxr_available);

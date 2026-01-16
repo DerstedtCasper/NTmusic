@@ -35,6 +35,18 @@ let mainWindow = null;
 let openChildWindows = [];
 let ntaBridge = null;
 let engineGateway = null;
+let restartAttempts = 0;
+let restartTimer = null;
+let appQuitting = false;
+let lastEngineStatus = null;
+const MAX_RESTART_ATTEMPTS = 5;
+const RESTART_BACKOFF_MS = [0, 1000, 2000, 5000, 10000, 15000];
+
+function broadcastEngineStatus(connected, message) {
+    const payload = { type: 'engine.status', connected: Boolean(connected), message };
+    lastEngineStatus = payload;
+    broadcastEngineEvent(payload);
+}
 
 function getAppRoot() {
     return app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', '..');
@@ -109,6 +121,7 @@ function startAudioEngine() {
 
         const enginePath = resolveEngineBinary();
         if (!enginePath) {
+            broadcastEngineStatus(false, 'engine binary not found');
             reject(new Error('Rust audio engine not found. Please build vmusic_engine.exe.'));
             return;
         }
@@ -135,6 +148,7 @@ function startAudioEngine() {
         audioEngineProcess = spawn(enginePath, [], { cwd: engineDir, env });
 
         const readyTimeout = setTimeout(() => {
+            broadcastEngineStatus(false, 'engine startup timeout');
             reject(new Error('Audio Engine timed out.'));
         }, 15000);
 
@@ -142,6 +156,8 @@ function startAudioEngine() {
             const output = data.toString().trim();
             if (output.includes('VMUSIC_ENGINE_READY')) {
                 clearTimeout(readyTimeout);
+                restartAttempts = 0;
+                broadcastEngineStatus(true, 'engine ready');
                 resolve();
             }
         });
@@ -155,13 +171,38 @@ function startAudioEngine() {
 
         audioEngineProcess.on('close', () => {
             audioEngineProcess = null;
+            scheduleEngineRestart('engine-closed');
         });
 
         audioEngineProcess.on('error', (err) => {
             clearTimeout(readyTimeout);
+            broadcastEngineStatus(false, `engine error: ${err.message}`);
             reject(err);
         });
     });
+}
+
+function scheduleEngineRestart(reason) {
+    if (appQuitting) return;
+    if (restartTimer) return;
+    if (restartAttempts >= MAX_RESTART_ATTEMPTS) {
+        console.error(`[AudioEngine] restart attempts exceeded (${MAX_RESTART_ATTEMPTS}). Last reason: ${reason}`);
+        broadcastEngineStatus(false, `engine restart failed (${reason})`);
+        return;
+    }
+    const index = Math.min(restartAttempts, RESTART_BACKOFF_MS.length - 1);
+    const delay = RESTART_BACKOFF_MS[index];
+    restartAttempts += 1;
+    broadcastEngineStatus(false, `engine restarting (${restartAttempts}/${MAX_RESTART_ATTEMPTS})`);
+    restartTimer = setTimeout(async () => {
+        restartTimer = null;
+        try {
+            await startAudioEngine();
+        } catch (err) {
+            console.error('[AudioEngine] restart failed:', err);
+            scheduleEngineRestart('restart-failed');
+        }
+    }, delay);
 }
 
 function stopAudioEngine() {
@@ -187,6 +228,11 @@ function registerWindowControls() {
         }
     });
 
+    ipcMain.handle('window-close', (event) => {
+        const win = BrowserWindow.fromWebContents(event.sender);
+        if (win) win.close();
+    });
+
     ipcMain.handle('get-current-theme', () =>
         nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
     );
@@ -208,14 +254,37 @@ function registerNtaBridgeIpc() {
 }
 
 function broadcastEngineEvent(event) {
+    if (event && event.type === 'engine.status') {
+        lastEngineStatus = event;
+    }
     for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send('engine:event', event);
     }
 }
 
+function sendEngineStatusToWebContents(webContents) {
+    if (!lastEngineStatus || !webContents || webContents.isDestroyed()) return;
+    webContents.send('engine:event', lastEngineStatus);
+}
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForEngineHttpReady(maxAttempts = 12, intervalMs = 500) {
+    if (!engineGateway) return false;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const ok = await engineGateway.refreshState();
+        if (ok) return true;
+        await delay(intervalMs);
+    }
+    return false;
+}
+
 async function bootstrap() {
     await ensureAppDataDirs();
     registerWindowControls();
+    ipcMain.on('music-renderer-ready', (event) => {
+        sendEngineStatusToWebContents(event.sender);
+    });
     ntaBridge = createNtaBridge({
         appRoot: getAppRoot(),
         resourcesPath: process.resourcesPath,
@@ -227,6 +296,16 @@ async function bootstrap() {
         engineUrl: ENGINE_URL,
         emitEvent: broadcastEngineEvent
     });
+    try {
+        await startAudioEngine();
+    } catch (err) {
+        const message = err && err.message ? err.message : 'engine start failed';
+        broadcastEngineStatus(false, `engine error: ${message}`);
+    }
+    const httpReady = await waitForEngineHttpReady();
+    if (!httpReady) {
+        broadcastEngineStatus(false, 'engine http timeout');
+    }
     engineGateway.connectWs();
     registerEngineIpc(engineGateway);
 
@@ -242,9 +321,18 @@ async function bootstrap() {
     mainWindow = await musicHandlers.openMusicWindow();
     openChildWindows.push(mainWindow);
     musicHandlers.initialize({ mainWindow });
+    sendEngineStatusToWebContents(mainWindow.webContents);
 }
 
 app.whenReady().then(bootstrap);
+
+app.on('before-quit', () => {
+    appQuitting = true;
+    if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
+    }
+});
 
 app.on('window-all-closed', () => {
     stopAudioEngine();

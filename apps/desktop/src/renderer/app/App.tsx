@@ -102,12 +102,18 @@ export const App = () => {
     }
     const message = engineMessage || '';
     const lower = message.toLowerCase();
-    if (lower.includes('timeout')) {
-      setEngineAlert('引擎启动超时，请检查 vmusic_engine 是否可用。');
+    if (lower.includes('restart')) {
+      setEngineAlert('引擎正在重启，请稍后...');
     } else if (lower.includes('not found')) {
       setEngineAlert('未找到引擎可执行文件，请先构建或检查安装。');
+    } else if (lower.includes('timeout')) {
+      setEngineAlert('引擎启动超时，请检查 vmusic_engine 是否可用。');
     } else if (lower.includes('http')) {
       setEngineAlert('引擎通信失败，请稍后重试。');
+    } else if (lower.includes('error')) {
+      setEngineAlert('引擎发生错误，请查看日志。');
+    } else if (lower.includes('disconnected')) {
+      setEngineAlert('引擎已断开连接，正在重试。');
     } else {
       setEngineAlert(message || '引擎未连接，请检查日志或重启。');
     }
@@ -140,6 +146,36 @@ export const App = () => {
   const isPlaying = Boolean(playback?.is_playing && !playback?.is_paused);
   const currentTime = Number(playback?.current_time || 0);
   const duration = Number(playback?.duration || 0);
+  const displayTitle = currentTrack.title || fallbackTrack.title;
+  const displayArtist = currentTrack.artist || fallbackTrack.artist;
+  const engineStatusLabel = connected ? 'ENGINE ONLINE' : 'ENGINE OFFLINE';
+  const engineStatusHint = connected
+    ? '连接稳定'
+    : engineAlert || '引擎未连接，请检查日志或重启。';
+  const playbackLabel = isPlaying ? '播放中' : '暂停中';
+  const bufferLabel =
+    bufferMs !== null ? `缓冲 ${Math.round(bufferMs)}ms` : '缓冲未知';
+  const handleWindowMinimize = () => {
+    if (window.electronAPI?.minimizeWindow) {
+      window.electronAPI.minimizeWindow();
+      return;
+    }
+    window.electron?.invoke?.('window-minimize');
+  };
+  const handleWindowMaximize = () => {
+    if (window.electronAPI?.maximizeWindow) {
+      window.electronAPI.maximizeWindow();
+      return;
+    }
+    window.electron?.invoke?.('window-maximize');
+  };
+  const handleWindowClose = () => {
+    if (window.electronAPI?.closeWindow) {
+      window.electronAPI.closeWindow();
+      return;
+    }
+    window.electron?.invoke?.('window-close');
+  };
 
   const handleSelect = async (index: number) => {
     if (!connected) return;
@@ -227,170 +263,208 @@ export const App = () => {
   };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar panel">
-        <div className="brand">
-          <div className="brand-mark" />
-          <div className="brand-text">
-            <div className="brand-name">NTmusic</div>
-            <div className="brand-subtitle">Spotify 风格重构骨架</div>
+    <div className="app-frame">
+      <header className="titlebar">
+        <div className="titlebar-left">
+          <div className="logo-orb" />
+          <div className="title-stack">
+            <div className="title-name">NTmusic</div>
+            <div className="title-sub">Spatial-ready playback lab</div>
           </div>
         </div>
-        <nav className="nav">
-          <button className="nav-item active">首页</button>
-          <button className="nav-item">搜索</button>
-          <button className="nav-item">本地库</button>
-          <button className="nav-item">收藏</button>
-        </nav>
-        <div className="sidebar-section">
-          <div className="section-title">连接状态</div>
-          <div className={`status-chip ${connected ? 'ok' : 'warn'}`}>
-            {connected ? 'Engine Connected' : 'Engine Offline'}
-          </div>
-          {!connected && (
-            <div className="engine-warning">
-              {engineMessage || '引擎未连接，请检查日志或重启。'}
-            </div>
-          )}
+        <div className="titlebar-center">
+          <div className="now-label">Now Playing</div>
+          <div className="now-title">{displayTitle}</div>
+          <div className="now-artist">{displayArtist}</div>
         </div>
-        <div className="sidebar-section">
+        <div className="titlebar-right">
+          <div className={`engine-pill ${connected ? 'ok' : 'warn'}`}>
+            {engineStatusLabel}
+          </div>
+          <div className="engine-hint">{engineStatusHint}</div>
+        </div>
+        <div className="titlebar-controls">
           <button
-            className="ghost-btn full-width"
-            onClick={() => window.electron?.send('open-music-folder')}
+            className="window-btn"
+            type="button"
+            onClick={handleWindowMinimize}
+            aria-label="最小化"
           >
-            导入文件夹
+            —
+          </button>
+          <button
+            className="window-btn"
+            type="button"
+            onClick={handleWindowMaximize}
+            aria-label="最大化"
+          >
+            □
+          </button>
+          <button
+            className="window-btn close"
+            type="button"
+            onClick={handleWindowClose}
+            aria-label="关闭"
+          >
+            ×
           </button>
         </div>
-      </aside>
+      </header>
 
-      <main className="content">
-        {!connected && (
-          <div className="banner-warning">
-            {engineAlert || '引擎离线：播放/设备控制已禁用。请确认 vmusic_engine 是否启动。'}
+      {!connected && (
+        <div className="status-banner">
+          <span className="status-tag">引擎未连接</span>
+          <span>{engineStatusHint}</span>
+        </div>
+      )}
+
+      <div className="app-body">
+        <aside className="nav-panel">
+          <div className="nav-group">
+            <button className="nav-pill active">首页</button>
+            <button className="nav-pill">搜索</button>
+            <button className="nav-pill">本地库</button>
+            <button className="nav-pill">收藏</button>
           </div>
-        )}
-        <section className="hero panel">
-          <div className="track-info">
-            <div className="album-art-wrapper">
-              {currentTrack.albumArt ? (
-                <img src={`file://${currentTrack.albumArt}`} alt={currentTrack.title} />
-              ) : (
-                <div className="album-art-placeholder" />
-              )}
+          <div className="panel status-card">
+            <div className="section-title">连接状态</div>
+            <div className={`status-chip ${connected ? 'ok' : 'warn'}`}>
+              {connected ? 'Engine Connected' : 'Engine Offline'}
             </div>
-            <div className="track-details">
-              <div className="track-title">{currentTrack.title || fallbackTrack.title}</div>
-              <div className="track-artist">{currentTrack.artist || fallbackTrack.artist}</div>
-              <div className="track-meta">
-                <span className="chip">Hi-Res Ready</span>
-                <span className={`chip ${connected ? 'accent' : ''}`}>
-                  {connected ? 'Engine Online' : 'Waiting for Engine'}
-                </span>
+            <p className="status-text">
+              {connected ? '引擎已连接，可进行播放与设备控制。' : engineStatusHint}
+            </p>
+            <button
+              className="ghost-btn full-width"
+              onClick={() => window.electron?.send('open-music-folder')}
+            >
+              导入文件夹
+            </button>
+          </div>
+        </aside>
+
+        <main className="main-panel">
+          <section className="panel hero-card">
+            <div className="hero-top">
+              <div className="album-shell">
+                {currentTrack.albumArt ? (
+                  <img src={`file://${currentTrack.albumArt}`} alt={displayTitle} />
+                ) : (
+                  <div className="album-placeholder" />
+                )}
+              </div>
+              <div className="hero-copy">
+                <div className="hero-title">{displayTitle}</div>
+                <div className="hero-artist">{displayArtist}</div>
+                <div className="hero-meta">
+                  <span className="chip">Hi-Res Ready</span>
+                  <span className={`chip ${connected ? 'accent' : ''}`}>
+                    {connected ? 'Engine Online' : 'Waiting for Engine'}
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
-          <div className="hero-actions">
-            <div className="hero-actions-left">
-              <div className="mode-pill">{isPlaying ? '播放中' : '暂停'}</div>
+            <div className="hero-stats">
+              <div className="stat-pill">{playbackLabel}</div>
+              <div className="stat-text">{bufferLabel}</div>
             </div>
-            <div className="hero-actions-right">
-              <span className="buffer-status">
-                {bufferMs !== null ? `缓冲 ${Math.round(bufferMs)}ms` : '缓冲未知'}
-              </span>
-            </div>
-          </div>
-        </section>
+          </section>
 
-        <InputPanel
-          mode={inputMode}
-          streamUrl={streamUrl}
-          captureDevices={captureDevices}
-          captureDeviceId={captureDeviceId}
-          onCaptureDeviceChange={setCaptureDeviceId}
-          onModeChange={setInputMode}
-          onStreamUrlChange={setStreamUrl}
-          onStreamStart={handleStreamStart}
-          onStreamStop={handleStreamStop}
-          onCaptureStart={handleCaptureStart}
-          onCaptureStop={handleCaptureStop}
-          onRefreshCaptureDevices={refreshCaptureDevices}
-        />
+          <div className="main-grid">
+            <InputPanel
+              mode={inputMode}
+              streamUrl={streamUrl}
+              captureDevices={captureDevices}
+              captureDeviceId={captureDeviceId}
+              onCaptureDeviceChange={setCaptureDeviceId}
+              onModeChange={setInputMode}
+              onStreamUrlChange={setStreamUrl}
+              onStreamStart={handleStreamStart}
+              onStreamStop={handleStreamStop}
+              onCaptureStart={handleCaptureStart}
+              onCaptureStop={handleCaptureStop}
+              onRefreshCaptureDevices={refreshCaptureDevices}
+            />
 
-        <PlaylistPanel
-          tracks={tracks}
-          currentIndex={currentIndex}
-          scanning={scanning}
-          scanned={scanDone}
-          total={scanTotal}
-          onImport={() => window.electron?.send('open-music-folder')}
-          onSelect={handleSelect}
-        />
-      </main>
-
-      <aside className="inspector">
-        <div className="panel settings-container">
-          <div className="section-title">模式</div>
-          <div className="setting-row">
-            <label>Pro 模式</label>
-            <input
-              type="checkbox"
-              checked={proMode}
-              onChange={(event) => setProMode(event.target.checked)}
+            <PlaylistPanel
+              tracks={tracks}
+              currentIndex={currentIndex}
+              scanning={scanning}
+              scanned={scanDone}
+              total={scanTotal}
+              onImport={() => window.electron?.send('open-music-folder')}
+              onSelect={handleSelect}
             />
           </div>
-          <div className="tab-row">
-            <button
-              className={`tab-btn ${inspectorTab === 'lyrics' ? 'active' : ''}`}
-              onClick={() => setInspectorTab('lyrics')}
-            >
-              Lyrics
-            </button>
-            <button
-              className={`tab-btn ${inspectorTab === 'dsp' ? 'active' : ''}`}
-              onClick={() => setInspectorTab('dsp')}
-            >
-              DSP
-            </button>
-            <button
-              className={`tab-btn ${inspectorTab === 'analyzer' ? 'active' : ''}`}
-              onClick={() => setInspectorTab('analyzer')}
-            >
-              Analyzer
-            </button>
-          </div>
-        </div>
-        <DevicePanel
-          devices={devices}
-          currentDeviceId={deviceId}
-          exclusive={exclusive}
-          onRefresh={refreshDevices}
-          onChange={handleDeviceChange}
-          onToggleExclusive={handleToggleExclusive}
-        />
-        <QualityPanel playback={playback} proMode={proMode} />
-        <EqPanel playback={playback} proMode={proMode} />
-        {inspectorTab === 'dsp' && <DspChainPanel proMode={proMode} />}
-        {inspectorTab === 'analyzer' && (
-          <AnalyzerPanel proMode={proMode} spectrum={spectrum} />
-        )}
-        {inspectorTab === 'lyrics' && (
-          <LyricsPanel
-            track={{ title: currentTrack.title, artist: currentTrack.artist }}
-            currentTime={currentTime}
-          />
-        )}
-      </aside>
+        </main>
 
-      <PlayerBar
-        isPlaying={isPlaying}
-        currentTime={currentTime}
-        duration={duration}
-        disabled={!connected}
-        onPlayPause={handlePlayPause}
-        onPrev={handlePrev}
-        onNext={handleNext}
-        onSeek={handleSeek}
-      />
+        <aside className="side-panel">
+          <div className="panel settings-container">
+            <div className="section-title">模式</div>
+            <div className="setting-row">
+              <label>Pro 模式</label>
+              <input
+                type="checkbox"
+                checked={proMode}
+                onChange={(event) => setProMode(event.target.checked)}
+              />
+            </div>
+            <div className="tab-row">
+              <button
+                className={`tab-btn ${inspectorTab === 'lyrics' ? 'active' : ''}`}
+                onClick={() => setInspectorTab('lyrics')}
+              >
+                Lyrics
+              </button>
+              <button
+                className={`tab-btn ${inspectorTab === 'dsp' ? 'active' : ''}`}
+                onClick={() => setInspectorTab('dsp')}
+              >
+                DSP
+              </button>
+              <button
+                className={`tab-btn ${inspectorTab === 'analyzer' ? 'active' : ''}`}
+                onClick={() => setInspectorTab('analyzer')}
+              >
+                Analyzer
+              </button>
+            </div>
+          </div>
+          <DevicePanel
+            devices={devices}
+            currentDeviceId={deviceId}
+            exclusive={exclusive}
+            onRefresh={refreshDevices}
+            onChange={handleDeviceChange}
+            onToggleExclusive={handleToggleExclusive}
+          />
+          <QualityPanel playback={playback} proMode={proMode} />
+          <EqPanel playback={playback} proMode={proMode} />
+          {inspectorTab === 'dsp' && <DspChainPanel proMode={proMode} />}
+          {inspectorTab === 'analyzer' && (
+            <AnalyzerPanel proMode={proMode} spectrum={spectrum} />
+          )}
+          {inspectorTab === 'lyrics' && (
+            <LyricsPanel
+              track={{ title: displayTitle, artist: displayArtist }}
+              currentTime={currentTime}
+            />
+          )}
+        </aside>
+      </div>
+
+      <div className="player-footer">
+        <PlayerBar
+          isPlaying={isPlaying}
+          currentTime={currentTime}
+          duration={duration}
+          disabled={!connected}
+          onPlayPause={handlePlayPause}
+          onPrev={handlePrev}
+          onNext={handleNext}
+          onSeek={handleSeek}
+        />
+      </div>
     </div>
   );
 };

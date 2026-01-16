@@ -119,6 +119,7 @@ pub fn create_control_shm(dir: String, capacity: u32) -> Result<ControlSpec> {
 pub struct SpectrumReader {
     mmap: MmapMut,
     bins: usize,
+    last_seq: u32,
 }
 
 #[napi]
@@ -141,7 +142,11 @@ impl SpectrumReader {
             MmapMut::map_mut(&file)
                 .map_err(|err| Error::from_reason(err.to_string()))?
         };
-        Ok(SpectrumReader { mmap, bins })
+        Ok(SpectrumReader {
+            mmap,
+            bins,
+            last_seq: 0,
+        })
     }
 
     #[napi]
@@ -158,6 +163,9 @@ impl SpectrumReader {
         let data_ptr = unsafe { self.mmap.as_ptr().add(SPECTRUM_HEADER_BYTES) as *const f32 };
         for _ in 0..2 {
             let seq_start = seq.load(Ordering::Acquire);
+            if seq_start == self.last_seq && seq_start & 1 == 0 {
+                return Ok(0);
+            }
             if seq_start & 1 == 1 {
                 continue;
             }
@@ -172,6 +180,7 @@ impl SpectrumReader {
             }
             let seq_end = seq.load(Ordering::Acquire);
             if seq_start == seq_end && seq_end & 1 == 0 {
+                self.last_seq = seq_end;
                 return Ok(len as u32);
             }
         }

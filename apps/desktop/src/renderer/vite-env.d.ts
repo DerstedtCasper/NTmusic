@@ -11,6 +11,12 @@ declare global {
       invoke: (channel: string, data?: unknown) => Promise<any>;
       on: (channel: string, callback: (...args: any[]) => void) => void;
     };
+    ntmusicNta?: {
+      getSpectrumBuffer?: () => Promise<SharedArrayBuffer | null>;
+      getSpectrumLength?: () => Promise<number>;
+      consumeSpectrumFrame?: () => Promise<{ buffer: SharedArrayBuffer; bins: number } | null>;
+      setSpectrumWs?: (enabled: boolean) => Promise<unknown>;
+    };
   }
 }
 

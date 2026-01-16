@@ -27,6 +27,11 @@ NTmusic 是一个基于 Rust 引擎的独立音频播放器项目，源自 VCPCh
 - 引擎离线时新 UI 会显示告警并禁用播放与设备控制。
 - Legacy UI 顶部会显示提示条，提醒迁移至新 UI。
 
+## 音质与重采样说明
+- **重采样质量档位**：`low / std / hq / uhq`，用于控制引擎重采样质量与性能取舍。
+- **Auto 策略**：当模式为 `auto` 时，`low/std` 优先 Rubato，`hq/uhq` 优先 SoXR（若可用）。
+- **抖动处理**：支持 `TPDF` 以及 `TPDF NS1/NS2`（噪声整形）档位，可在 Pro 模式中选择 16/24bit。
+
 ### 新 UI 构建与入口
 - 构建命令：`apps/desktop` 下执行 `npm run build:renderer` 产出 `renderer-dist/`
 - Electron 会优先加载 `renderer-dist/index.html`，无该目录时才回退 Legacy UI

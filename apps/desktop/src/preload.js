@@ -38,6 +38,7 @@ const invokeChannels = [
     'music-fetch-lyrics',
     'window-minimize',
     'window-maximize',
+    'window-close',
     'get-current-theme'
 ];
 
@@ -91,6 +92,7 @@ let spectrumSharedBuffer = null;
 let spectrumReader = null;
 let spectrumTimer = null;
 let spectrumBins = 0;
+let spectrumDirty = false;
 let nativeAddon = null;
 let controlSpecPromise = null;
 let controlWriter = null;
@@ -154,7 +156,10 @@ async function initSpectrumBuffer() {
     spectrumTimer = setInterval(() => {
         if (!spectrumReader) return;
         try {
-            spectrumReader.readInto(spectrumView);
+            const updated = spectrumReader.readInto(spectrumView);
+            if (updated > 0) {
+                spectrumDirty = true;
+            }
         } catch (_err) {
             // Keep last buffer if sync fails.
         }
@@ -194,6 +199,7 @@ contextBridge.exposeInMainWorld('electron', {
 contextBridge.exposeInMainWorld('electronAPI', {
     minimizeWindow: () => ipcRenderer.invoke('window-minimize'),
     maximizeWindow: () => ipcRenderer.invoke('window-maximize'),
+    closeWindow: () => ipcRenderer.invoke('window-close'),
     getCurrentTheme: () => ipcRenderer.invoke('get-current-theme'),
     onThemeUpdated: (callback) => {
         const handler = (_event, theme) => callback(theme);
@@ -216,6 +222,11 @@ contextBridge.exposeInMainWorld('ntmusicNta', {
     getSpectrumLength: async () => {
         const spec = await getSpectrumSpec();
         return spec && spec.bins ? spec.bins : 0;
+    },
+    consumeSpectrumFrame: async () => {
+        if (!spectrumDirty || !spectrumSharedBuffer) return null;
+        spectrumDirty = false;
+        return { buffer: spectrumSharedBuffer, bins: spectrumBins };
     },
     setSpectrumWs: async (enabled) => {
         try {
