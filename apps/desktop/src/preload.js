@@ -202,6 +202,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
 });
 
+contextBridge.exposeInMainWorld('ntmusic', {
+    onEngineEvent: (callback) => {
+        const handler = (_event, payload) => callback(payload);
+        ipcRenderer.on('engine:event', handler);
+        return () => ipcRenderer.removeListener('engine:event', handler);
+    },
+    cmd: (name, payload) => ipcRenderer.invoke('engine:cmd', { name, payload })
+});
+
 contextBridge.exposeInMainWorld('ntmusicNta', {
     getSpectrumBuffer: () => initSpectrumBuffer(),
     getSpectrumLength: async () => {

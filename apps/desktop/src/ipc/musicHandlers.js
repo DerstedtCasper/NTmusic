@@ -19,6 +19,7 @@ let startAudioEngine; // To hold the function from main.js
 let stopAudioEngine; // To hold the function from main.js
 let audioEngineReadyPromise = null; // Promise to track engine readiness
 let isInitialized = false;
+let rendererTarget = null;
 
 // --- Singleton Music Window Creation Function ---
 function createOrFocusMusicWindow() {
@@ -68,7 +69,17 @@ function createOrFocusMusicWindow() {
             show: false
         });
 
-        musicWindow.loadFile(path.join(__dirname, '..', 'ui', 'music.html'));
+        if (rendererTarget && rendererTarget.type === 'url') {
+            musicWindow.loadURL(rendererTarget.value);
+        } else if (rendererTarget && rendererTarget.type === 'file') {
+            musicWindow.loadFile(rendererTarget.value);
+            if (rendererTarget.value.includes(path.join('ui', 'music.html'))) {
+                musicWindow.setTitle('NTmusic Legacy');
+            }
+        } else {
+            musicWindow.loadFile(path.join(__dirname, '..', 'ui', 'music.html'));
+            musicWindow.setTitle('NTmusic Legacy');
+        }
         
         openChildWindows.push(musicWindow);
         musicWindow.setMenu(null);
@@ -202,6 +213,9 @@ function initialize(options) {
     }
     if (options.stopAudioEngine) {
         stopAudioEngine = options.stopAudioEngine;
+    }
+    if (options.rendererTarget) {
+        rendererTarget = options.rendererTarget;
     }
     if (options.APP_DATA_ROOT_IN_PROJECT) {
         const APP_DATA_ROOT_IN_PROJECT = options.APP_DATA_ROOT_IN_PROJECT;

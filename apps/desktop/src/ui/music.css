@@ -31,6 +31,20 @@ body:not(.mode-pro) .pro-only {
     display: none;
 }
 
+.legacy-banner {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+    background: rgba(255, 197, 66, 0.2);
+    color: #ffd166;
+    padding: 6px 16px;
+    font-size: 0.75em;
+    text-align: center;
+    border-bottom: 1px solid rgba(255, 197, 66, 0.3);
+    backdrop-filter: blur(8px);
+    letter-spacing: 0.4px;
+}
+
 #player-background {
     position: fixed;
     inset: -40px;

@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs-extra');
 const { spawn } = require('child_process');
 const { createNtaBridge } = require('./services/ntaBridge');
+const { EngineGateway } = require('./main/engineGateway');
+const { registerEngineIpc } = require('./main/ipc');
 
 const DEFAULT_ENGINE_PORT = 55554;
 const ENGINE_PORT = (() => {
@@ -32,6 +34,7 @@ let audioEngineProcess = null;
 let mainWindow = null;
 let openChildWindows = [];
 let ntaBridge = null;
+let engineGateway = null;
 
 function getAppRoot() {
     return app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', '..');
@@ -52,6 +55,19 @@ function getSoxrDir() {
 
 function getNtaDir() {
     return path.join(getAppDataRoot(), 'nta');
+}
+
+function resolveRendererTarget() {
+    const devUrl = process.env.VITE_DEV_SERVER_URL;
+    if (devUrl) {
+        return { type: 'url', value: devUrl };
+    }
+    const appPath = app.isPackaged ? app.getAppPath() : getAppRoot();
+    const rendererIndex = path.join(appPath, 'renderer-dist', 'index.html');
+    if (fs.pathExistsSync(rendererIndex)) {
+        return { type: 'file', value: rendererIndex };
+    }
+    return { type: 'file', value: path.join(__dirname, 'ui', 'music.html') };
 }
 
 function resolveEngineBinary() {
@@ -191,6 +207,12 @@ function registerNtaBridgeIpc() {
     ipcMain.handle('nta-get-control-spec', () => ntaBridge.getControlSpec());
 }
 
+function broadcastEngineEvent(event) {
+    for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send('engine:event', event);
+    }
+}
+
 async function bootstrap() {
     await ensureAppDataDirs();
     registerWindowControls();
@@ -201,13 +223,20 @@ async function bootstrap() {
         spectrumDir: getNtaDir()
     });
     registerNtaBridgeIpc();
+    engineGateway = new EngineGateway({
+        engineUrl: ENGINE_URL,
+        emitEvent: broadcastEngineEvent
+    });
+    engineGateway.connectWs();
+    registerEngineIpc(engineGateway);
 
     musicHandlers.initialize({
         mainWindow,
         openChildWindows,
         APP_DATA_ROOT_IN_PROJECT: getAppDataRoot(),
         startAudioEngine,
-        stopAudioEngine
+        stopAudioEngine,
+        rendererTarget: resolveRendererTarget()
     });
 
     mainWindow = await musicHandlers.openMusicWindow();

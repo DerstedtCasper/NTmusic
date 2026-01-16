@@ -8,3 +8,4 @@ target/
 **/target/
 apps/desktop/dist/
 apps/desktop/.icon-ico/
+apps/desktop/renderer-dist/

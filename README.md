@@ -20,5 +20,16 @@ NTmusic 是一个基于 Rust 引擎的独立音频播放器项目，源自 VCPCh
 - **安装版**：到 GitHub Releases 下载 `NTmusic Setup 0.1.0.exe`，安装后从开始菜单启动。
 - **注意**：仓库页面的 “Code → Download ZIP” 是源码包，不包含可执行程序。
 
+## 新 UI 说明
+- 默认启动为 **React + Vite 新 UI**（Spotify 风格布局 + 模块化结构）。
+- 旧 UI 保留为 legacy fallback（仅当新 UI 构建产物缺失时自动回退，并显示 Legacy 标记）。
+- 右侧面板为可切换标签：Lyrics / DSP / Analyzer。
+- 引擎离线时新 UI 会显示告警并禁用播放与设备控制。
+- Legacy UI 顶部会显示提示条，提醒迁移至新 UI。
+
+### 新 UI 构建与入口
+- 构建命令：`apps/desktop` 下执行 `npm run build:renderer` 产出 `renderer-dist/`
+- Electron 会优先加载 `renderer-dist/index.html`，无该目录时才回退 Legacy UI
+
 ## 开发定位
 这个仓库是“播放器骨架 + 高性能引擎”的独立形态，不追求与旧版 100% 功能一致；优先保证结构清晰、可扩展和工程可维护。

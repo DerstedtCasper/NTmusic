@@ -1,12 +1,12 @@
-// Musicmodules/music.js - Rewritten for Python Hi-Fi Audio Engine
+﻿// Musicmodules/music.js - Rewritten for Python Hi-Fi Audio Engine
 document.addEventListener('DOMContentLoaded', () => {
     // --- DOM Element Selections ---
     const playPauseBtn = document.getElementById('play-pause-btn');
     const prevBtn = document.getElementById('prev-btn');
     const nextBtn = document.getElementById('next-btn');
     const modeBtn = document.getElementById('mode-btn');
-    const volumeBtn = document.getElementById('volume-btn'); // 音量功能暂时由UI控制，不与引擎交互
-    const volumeSlider = document.getElementById('volume-slider'); // 同上
+    const volumeBtn = document.getElementById('volume-btn'); // 闊抽噺鍔熻兘鏆傛椂鐢盪I鎺у埗锛屼笉涓庡紩鎿庝氦浜?
+    const volumeSlider = document.getElementById('volume-slider'); // 鍚屼笂
     const progressContainer = document.querySelector('.progress-container');
     const progressBar = document.querySelector('.progress-bar');
     const progress = document.querySelector('.progress');
@@ -61,6 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const uiModeToggle = document.getElementById('ui-mode-toggle');
 
   const phantomAudio = document.getElementById('phantom-audio');
+  const store = window.ntmusicStore;
  
   // --- Custom Title Bar ---
   const minimizeBtn = document.getElementById('minimize-music-btn');
@@ -70,11 +71,8 @@ document.addEventListener('DOMContentLoaded', () => {
    // --- State Variables ---
     let playlist = [];
     let currentTrackIndex = 0;
-    let isPlaying = false; // 本地UI状态，会与引擎同步
+    let isPlaying = false; // 鏈湴UI鐘舵€侊紝浼氫笌寮曟搸鍚屾
     let currentInputMode = 'file';
-    let engineUrl = 'http://127.0.0.1:55554';
-    let engineWs = null;
-    let wsReconnectTimer = null;
     const playModes = ['repeat', 'repeat-one', 'shuffle'];
     let currentPlayMode = 0;
     let currentTheme = 'dark';
@@ -101,6 +99,40 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const engineCmd = async (name, payload) => {
+        if (window.ntmusic && typeof window.ntmusic.cmd === 'function') {
+            return window.ntmusic.cmd(name, payload);
+        }
+        if (!window.electron) {
+            return { status: 'error', message: 'Engine command unavailable.' };
+        }
+        const legacyMap = {
+            state: 'music-get-state',
+            play: 'music-play',
+            pause: 'music-pause',
+            stop: 'music-stop',
+            seek: 'music-seek',
+            load: 'music-load',
+            'set-volume': 'music-set-volume',
+            'get-devices': 'music-get-devices',
+            'configure-output': 'music-configure-output',
+            'set-eq': 'music-set-eq',
+            'set-eq-type': 'music-set-eq-type',
+            'configure-optimizations': 'music-configure-optimizations',
+            'configure-upsampling': 'music-configure-upsampling',
+            'load-stream': 'music-load-stream',
+            'capture-start': 'music-capture-start',
+            'capture-stop': 'music-capture-stop',
+            'get-capture-devices': 'music-get-capture-devices',
+            'spectrum-ws': 'nta-set-spectrum-ws'
+        };
+        const channel = legacyMap[name];
+        if (!channel) {
+            return { status: 'error', message: `Unknown engine cmd: ${name}` };
+        }
+        return window.electron.invoke(channel, payload);
+    };
+
     const setSpectrumWs = async (enabled) => {
         if (!window.ntmusicNta || typeof window.ntmusicNta.setSpectrumWs !== 'function') {
             return;
@@ -116,13 +148,20 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!uiModeToggle) return;
         document.body.classList.toggle('mode-pro', uiModeToggle.checked);
     };
+
+    const markLegacyHint = () => {
+        const banner = document.querySelector('.legacy-banner');
+        if (!banner) return;
+        banner.innerHTML =
+            '当前为 Legacy UI（旧版界面）。请优先使用新 UI（React + Vite）。';
+    };
     let lyricSpeedFactor = 1.0; // Should be 1.0 for correctly timed LRC files.
     let lastKnownCurrentTime = 0;
     let lastStateUpdateTime = 0;
     let lastKnownDuration = 0;
     let wnpAdapter; // Rainmeter WebNowPlaying Adapter
     let visualizerColor = { r: 29, g: 185, b: 84 };
-    let statePollInterval; // 用于轮询状态的定时器
+    let statePollInterval; // 鐢ㄤ簬杞鐘舵€佺殑瀹氭椂鍣?
    let currentDeviceId = null;
    let useWasapiExclusive = false;
    let targetUpsamplingRate = 0;
@@ -147,13 +186,13 @@ let isDraggingProgress = false;
     let spectrumSharedView = null;
     let spectrumSharedBins = 0;
     let useSharedSpectrum = false;
-    const easingFactor = 0.2; // 缓动因子，值越小动画越平滑
-    let bassScale = 1.0; // 用于专辑封面 Bass 动画
-    const BASS_BOOST = 1.06; // Bass 触发时的放大系数
-    const BASS_DECAY = 0.96; // 动画恢复速度
-    const BASS_THRESHOLD = 0.55; // Bass 触发阈值
-    let particles = []; // 用于存储粒子
-    const PARTICLE_COUNT = 80; // 定义粒子数量
+    const easingFactor = 0.2; // 缂撳姩鍥犲瓙锛屽€艰秺灏忓姩鐢昏秺骞虫粦
+    let bassScale = 1.0; // 鐢ㄤ簬涓撹緫灏侀潰 Bass 鍔ㄧ敾
+    const BASS_BOOST = 1.06; // Bass 瑙﹀彂鏃剁殑鏀惧ぇ绯绘暟
+    const BASS_DECAY = 0.96; // 鍔ㄧ敾鎭㈠閫熷害
+    const BASS_THRESHOLD = 0.55; // Bass 瑙﹀彂闃堝€?
+    let particles = []; // 鐢ㄤ簬瀛樺偍绮掑瓙
+    const PARTICLE_COUNT = 80; // 瀹氫箟绮掑瓙鏁伴噺
 
     // --- Particle Class ---
     class Particle {
@@ -191,19 +230,7 @@ let isDraggingProgress = false;
         }
     };
  
-    // --- WebSocket for Visualization ---
-    const resolveEngineUrl = async () => {
-        if (!window.electron) return;
-        try {
-            const result = await window.electron.invoke('music-get-engine-url');
-            if (result && result.status === 'success' && result.url) {
-                engineUrl = result.url;
-            }
-        } catch (_err) {
-            // fallback to default engineUrl
-        }
-    };
-
+    // --- Spectrum Bridge ---
     const initNtaSpectrum = async () => {
         if (!window.ntmusicNta || typeof window.ntmusicNta.getSpectrumBuffer !== 'function') {
             return;
@@ -231,69 +258,50 @@ let isDraggingProgress = false;
         }
     };
 
-    const toWsUrl = (url) => {
-        try {
-            const parsed = new URL(url);
-            parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-            parsed.pathname = '/ws';
-            parsed.search = '';
-            return parsed.toString();
-        } catch (_err) {
-            return 'ws://127.0.0.1:55554/ws';
+    const mergePlaybackState = (playback, buffer, stream) => {
+        if (!playback) return playback;
+        const merged = { ...playback };
+        if (buffer && typeof buffer.bufferedMs === 'number' && merged.buffered_ms === undefined) {
+            merged.buffered_ms = buffer.bufferedMs;
         }
+        if (stream && stream.status && !merged.stream_status) {
+            merged.stream_status = stream.status;
+        }
+        return merged;
     };
 
-    const connectEngineSocket = async () => {
-        await resolveEngineUrl();
-        const wsUrl = toWsUrl(engineUrl);
-        engineWs = new WebSocket(wsUrl);
-
-        engineWs.onopen = () => {
-            if (!animationFrameId) {
-                startVisualizerAnimation();
-            }
-        };
-
-        engineWs.onmessage = (event) => {
-            let payload;
-            try {
-                payload = JSON.parse(event.data);
-            } catch (_err) {
-                return;
-            }
-            if (payload.type === 'spectrum_data' && isPlaying) {
-                const data = payload.data || [];
-                if (!useSharedSpectrum) {
-                    targetVisualizerData = data;
-                    if (currentVisualizerData.length === 0) {
-                        currentVisualizerData = Array(targetVisualizerData.length).fill(0);
-                    }
+    const wireEngineEvents = () => {
+        if (window.ntmusic && store) {
+            window.ntmusic.onEngineEvent((event) => {
+                store.ingest(event);
+            });
+        }
+        if (!store) return;
+        store.subscribe((next, prev) => {
+            if (
+                next.playback !== prev.playback ||
+                next.buffer !== prev.buffer ||
+                next.stream !== prev.stream
+            ) {
+                const merged = mergePlaybackState(next.playback, next.buffer, next.stream);
+                if (merged) {
+                    updateUIWithState(merged);
                 }
-                return;
             }
-            if (payload.type === 'playback_state') {
-                updateUIWithState(payload.state);
-                return;
+            if (next.buffer !== prev.buffer && next.buffer) {
+                updateBufferState({ buffered_ms: next.buffer.bufferedMs });
             }
-            if (payload.type === 'buffer_state') {
-                updateBufferState(payload);
-                return;
+            if (next.stream !== prev.stream && next.stream) {
+                updateStreamState({ status: next.stream.status, error: next.stream.error });
             }
-            if (payload.type === 'stream_state') {
-                updateStreamState(payload);
+            if (next.spectrum !== prev.spectrum && !useSharedSpectrum && next.spectrum) {
+                targetVisualizerData = next.spectrum;
+                if (currentVisualizerData.length === 0) {
+                    currentVisualizerData = Array(targetVisualizerData.length).fill(0);
+                }
             }
-        };
-
-        engineWs.onclose = () => {
-            engineWs = null;
-            if (wsReconnectTimer) {
-                clearTimeout(wsReconnectTimer);
-            }
-            wsReconnectTimer = setTimeout(connectEngineSocket, 2000);
-        };
+        });
     };
-
-
     // --- Helper Functions ---
     const formatTime = (seconds) => {
         const minutes = Math.floor(seconds / 60);
@@ -303,7 +311,7 @@ let isDraggingProgress = false;
 
     const updateBlurredBackground = (imageUrl) => {
         if (playerBackground) {
-            // 如果 imageUrl 是 'none'，它会清除背景图片，从而显示全局背景
+            // 濡傛灉 imageUrl 鏄?'none'锛屽畠浼氭竻闄よ儗鏅浘鐗囷紝浠庤€屾樉绀哄叏灞€鑳屾櫙
             playerBackground.style.backgroundImage = imageUrl;
         }
     };
@@ -349,7 +357,7 @@ let isDraggingProgress = false;
             return;
         }
         const errorText = payload.error ? ` (${payload.error})` : '';
-        streamStatusEl.textContent = `状态: ${payload.status}${errorText}`;
+        streamStatusEl.textContent = `鐘舵€? ${payload.status}${errorText}`;
     };
 
     const updateBufferState = (payload) => {
@@ -359,7 +367,7 @@ let isDraggingProgress = false;
             if (bufferStatusHero) bufferStatusHero.textContent = '';
             return;
         }
-        bufferStatusEl.textContent = `缓冲 ${Math.round(payload.buffered_ms)}ms`;
+        bufferStatusEl.textContent = `缂撳啿 ${Math.round(payload.buffered_ms)}ms`;
         if (bufferStatusHero) bufferStatusHero.textContent = bufferStatusEl.textContent;
     };
 
@@ -467,8 +475,8 @@ class WebNowPlayingAdapter {
         const artworkSrc = track.albumArt ? `file://${track.albumArt.replace(/\\/g, '/')}` : '';
 
         navigator.mediaSession.metadata = new MediaMetadata({
-            title: track.title || '未知标题',
-            artist: track.artist || '未知艺术家',
+            title: track.title || '鏈煡鏍囬',
+            artist: track.artist || '鏈煡鑹烘湳瀹?,
             album: track.album || 'VCP Music Player', // Default album name
             artwork: artworkSrc ? [{ src: artworkSrc }] : []
         });
@@ -477,13 +485,13 @@ class WebNowPlayingAdapter {
     // --- Core Player Logic ---
     const loadTrack = async (trackIndex, andPlay = true) => {
         if (playlist.length === 0) {
-            // 清空UI
-            trackTitle.textContent = '未选择歌曲';
-            trackArtist.textContent = '未知艺术家';
+            // 娓呯┖UI
+            trackTitle.textContent = '鏈€夋嫨姝屾洸';
+            trackArtist.textContent = '鏈煡鑹烘湳瀹?;
             trackBitrate.textContent = '';
             const defaultArtUrl = `url('../../assets/ntmusic-default.png')`;
             albumArt.style.backgroundImage = defaultArtUrl;
-            updateBlurredBackground('none'); // 没有歌曲时，回退到全局背景
+            updateBlurredBackground('none'); // 娌℃湁姝屾洸鏃讹紝鍥為€€鍒板叏灞€鑳屾櫙
             renderPlaylist();
             return;
         }
@@ -492,9 +500,9 @@ class WebNowPlayingAdapter {
         setInputMode('file');
         const track = playlist[trackIndex];
 
-        // 更新UI
-        trackTitle.textContent = track.title || '未知标题';
-        trackArtist.textContent = track.artist || '未知艺术家';
+        // 鏇存柊UI
+        trackTitle.textContent = track.title || '鏈煡鏍囬';
+        trackArtist.textContent = track.artist || '鏈煡鑹烘湳瀹?;
         if (track.bitrate) {
             trackBitrate.textContent = `${Math.round(track.bitrate / 1000)} kbps`;
         } else {
@@ -508,7 +516,7 @@ class WebNowPlayingAdapter {
             updateBlurredBackground(albumArtUrl);
         } else {
             albumArt.style.backgroundImage = defaultArtUrl;
-            updateBlurredBackground('none'); // 没有封面时，回退到全局背景
+            updateBlurredBackground('none'); // 娌℃湁灏侀潰鏃讹紝鍥為€€鍒板叏灞€鑳屾櫙
         }
 
         renderPlaylist();
@@ -516,10 +524,14 @@ class WebNowPlayingAdapter {
         updateMediaSessionMetadata(); // Update OS media controls
         if (wnpAdapter) wnpAdapter.sendUpdate();
 
-        // 通过IPC让主进程通知Python引擎加载文件
-        const result = await window.electron.invoke('music-load', track);
+        // 閫氳繃IPC璁╀富杩涚▼閫氱煡Python寮曟搸鍔犺浇鏂囦欢
+        const result = await engineCmd('load', { path: track.path });
         if (result && result.status === 'success') {
-            updateUIWithState(result.state);
+            if (store) {
+                store.ingest({ type: 'playback.state', state: result.state });
+            } else {
+                updateUIWithState(result.state);
+            }
             if (andPlay) {
                 playTrack();
             }
@@ -532,7 +544,7 @@ class WebNowPlayingAdapter {
         if (currentInputMode === 'file' && playlist.length === 0) return;
         const controlOk = await trySendControl(CONTROL_COMMANDS.PLAY);
         if (!controlOk) {
-            const result = await window.electron.invoke('music-play');
+            const result = await engineCmd('play');
             if (result.status !== 'success') {
                 return;
             }
@@ -547,7 +559,7 @@ class WebNowPlayingAdapter {
     const pauseTrack = async () => {
         const controlOk = await trySendControl(CONTROL_COMMANDS.PAUSE);
         if (!controlOk) {
-            const result = await window.electron.invoke('music-pause');
+            const result = await engineCmd('pause');
             if (result.status !== 'success') {
                 return;
             }
@@ -576,7 +588,7 @@ class WebNowPlayingAdapter {
                 currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
                 break;
             case 'repeat-one':
-                // 引擎会在播放结束时停止，我们需要在这里重新加载并播放
+                // 寮曟搸浼氬湪鎾斁缁撴潫鏃跺仠姝紝鎴戜滑闇€瑕佸湪杩欓噷閲嶆柊鍔犺浇骞舵挱鏀?
                 break; 
             case 'shuffle':
                 let nextIndex;
@@ -619,9 +631,9 @@ class WebNowPlayingAdapter {
         const progressPercent = displayMode === 'file' && duration > 0 ? (currentTime / duration) * 100 : 0;
         progress.style.width = `${progressPercent}%`;
 
-        // 检查播放是否已结束
+        // 妫€鏌ユ挱鏀炬槸鍚﹀凡缁撴潫
         if (displayMode === 'file' && state.is_playing === false && currentTrackIndex !== -1 && currentTime > 0) {
-             // 播放结束
+             // 鎾斁缁撴潫
             // console.log("Playback seems to have ended.");
             stopStatePolling();
             if (playModes[currentPlayMode] === 'repeat-one') {
@@ -683,36 +695,45 @@ class WebNowPlayingAdapter {
       }
 
       if (displayMode === 'stream') {
-          trackTitle.textContent = '流媒体播放';
-          trackArtist.textContent = state.stream_status ? `状态: ${state.stream_status}` : 'LIVE';
+          trackTitle.textContent = '娴佸獟浣撴挱鏀?;
+          trackArtist.textContent = state.stream_status ? `鐘舵€? ${state.stream_status}` : 'LIVE';
           trackBitrate.textContent = '';
       } else if (displayMode === 'capture') {
-          trackTitle.textContent = '系统捕获';
-          trackArtist.textContent = state.stream_status ? `状态: ${state.stream_status}` : 'LIVE';
+          trackTitle.textContent = '绯荤粺鎹曡幏';
+          trackArtist.textContent = state.stream_status ? `鐘舵€? ${state.stream_status}` : 'LIVE';
           trackBitrate.textContent = '';
       }
 
       if (displayMode === 'stream' || displayMode === 'capture') {
           if (streamStatusEl && state.stream_status) {
-              streamStatusEl.textContent = `状态: ${state.stream_status}`;
+              streamStatusEl.textContent = `鐘舵€? ${state.stream_status}`;
           }
           if (bufferStatusEl && typeof state.buffered_ms === 'number') {
-              bufferStatusEl.textContent = `缓冲 ${Math.round(state.buffered_ms)}ms`;
+              bufferStatusEl.textContent = `缂撳啿 ${Math.round(state.buffered_ms)}ms`;
           }
       }
       if (wnpAdapter) wnpAdapter.sendUpdate();
   };
 
    const pollState = async () => {
-        const result = await window.electron.invoke('music-get-state');
-        if (result.status === 'success') {
-            updateUIWithState(result.state);
+        let result;
+        if (window.ntmusic && typeof window.ntmusic.cmd === 'function') {
+            result = await window.ntmusic.cmd('state');
+        } else if (window.electron) {
+            result = await engineCmd('state');
+        }
+        if (result && result.status === 'success') {
+            if (store) {
+                store.ingest({ type: 'playback.state', state: result.state });
+            } else {
+                updateUIWithState(result.state);
+            }
         }
     };
 
     const startStatePolling = () => {
         if (statePollInterval) clearInterval(statePollInterval);
-        statePollInterval = setInterval(pollState, 250); // 每250ms更新一次进度
+        statePollInterval = setInterval(pollState, 250); // 姣?50ms鏇存柊涓€娆¤繘搴?
     };
 
     const stopStatePolling = () => {
@@ -730,19 +751,19 @@ class WebNowPlayingAdapter {
 
             // --- Bass Animation Logic ---
             if (isPlaying && currentVisualizerData.length > 0 && albumArtWrapper) {
-                // 从低频段计算 Bass 能量
-                const bassBinCount = Math.floor(currentVisualizerData.length * 0.05); // 取前5%的频段
+                // 浠庝綆棰戞璁＄畻 Bass 鑳介噺
+                const bassBinCount = Math.floor(currentVisualizerData.length * 0.05); // 鍙栧墠5%鐨勯娈?
                 let bassEnergy = 0;
                 for (let i = 0; i < bassBinCount; i++) {
                     bassEnergy += currentVisualizerData[i];
                 }
-                bassEnergy /= bassBinCount; // 平均能量
+                bassEnergy /= bassBinCount; // 骞冲潎鑳介噺
 
-                // 如果 Bass 能量超过阈值，则触发动画
+                // 濡傛灉 Bass 鑳介噺瓒呰繃闃堝€硷紝鍒欒Е鍙戝姩鐢?
                 if (bassEnergy > BASS_THRESHOLD && bassScale < BASS_BOOST) {
                     bassScale = BASS_BOOST;
                 } else {
-                    // 动画效果逐渐衰减回原样
+                    // 鍔ㄧ敾鏁堟灉閫愭笎琛板噺鍥炲師鏍?
                     bassScale = Math.max(1.0, bassScale * BASS_DECAY);
                 }
                 
@@ -761,7 +782,7 @@ class WebNowPlayingAdapter {
                currentVisualizerData = Array(sourceData.length).fill(0);
            }
 
-           // 使用缓动公式更新当前数据
+           // 浣跨敤缂撳姩鍏紡鏇存柊褰撳墠鏁版嵁
            for (let i = 0; i < sourceData.length; i++) {
                if (currentVisualizerData[i] === undefined) {
                    currentVisualizerData[i] = 0;
@@ -769,14 +790,14 @@ class WebNowPlayingAdapter {
                currentVisualizerData[i] += (sourceData[i] - currentVisualizerData[i]) * easingFactor;
            }
 
-           // 使用平滑后的当前数据进行绘制
+           // 浣跨敤骞虫粦鍚庣殑褰撳墠鏁版嵁杩涜缁樺埗
            drawVisualizer(currentVisualizerData);
 
-           // 更新和绘制粒子
-           // 更新和绘制粒子
+           // 鏇存柊鍜岀粯鍒剁矑瀛?
+           // 鏇存柊鍜岀粯鍒剁矑瀛?
            // First, update all particle positions based on the spectrum
            particles.forEach(p => {
-               // 找到粒子对应的频谱数据点
+               // 鎵惧埌绮掑瓙瀵瑰簲鐨勯璋辨暟鎹偣
                const positionRatio = p.x / visualizerCanvas.width;
                const dataIndexFloat = positionRatio * (currentVisualizerData.length - 1);
                const index1 = Math.floor(dataIndexFloat);
@@ -788,7 +809,7 @@ class WebNowPlayingAdapter {
                const fraction = dataIndexFloat - index1;
                const interpolatedValue = value1 + (value2 - value1) * fraction;
 
-               // 计算目标Y值，让粒子在频谱线上方一点
+               // 璁＄畻鐩爣Y鍊硷紝璁╃矑瀛愬湪棰戣氨绾夸笂鏂逛竴鐐?
                const spectrumY = visualizerCanvas.height - (interpolatedValue * visualizerCanvas.height * 1.2);
                p.targetY = spectrumY - 6; // Keep particles a bit higher than the curve
 
@@ -895,13 +916,13 @@ class WebNowPlayingAdapter {
     
     const handleProgressUpdate = async (e, shouldSeek = false) => {
         if (currentInputMode !== 'file') return;
-        if (!window.electron) return;
+        if (!window.ntmusic && !window.electron) return;
         const rect = progressContainer.getBoundingClientRect();
         // Ensure offsetX is within valid bounds
         const offsetX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
         const width = rect.width;
 
-        const result = await window.electron.invoke('music-get-state');
+        const result = await engineCmd('state');
         if (result.status === 'success' && result.state.duration > 0) {
             const duration = result.state.duration;
             const newTime = (offsetX / width) * duration;
@@ -913,7 +934,7 @@ class WebNowPlayingAdapter {
             if (shouldSeek) {
                 const controlOk = await trySendControl(CONTROL_COMMANDS.SEEK, newTime);
                 if (!controlOk) {
-                    await window.electron.invoke('music-seek', newTime);
+                    await engineCmd('seek', { position: newTime });
                 }
                 // If still playing after drag, resume polling
                 if (isPlaying) {
@@ -957,14 +978,14 @@ class WebNowPlayingAdapter {
         volumeSlider.style.backgroundSize = `${percentage}% 100%`;
     };
 
-    // 音量控制暂时保持前端控制，因为它不影响HIFI解码
+    // 闊抽噺鎺у埗鏆傛椂淇濇寔鍓嶇鎺у埗锛屽洜涓哄畠涓嶅奖鍝岺IFI瑙ｇ爜
     volumeSlider.addEventListener('input', async (e) => {
         const newVolume = parseFloat(e.target.value);
         updateVolumeSliderBackground(newVolume);
         if (window.electron) {
             const controlOk = await trySendControl(CONTROL_COMMANDS.VOLUME, newVolume);
             if (!controlOk) {
-                await window.electron.invoke('music-set-volume', newVolume);
+                await engineCmd('set-volume', { volume: newVolume });
             }
         }
     });
@@ -1042,15 +1063,15 @@ class WebNowPlayingAdapter {
 
    // --- WASAPI and Device Control ---
    const populateDeviceList = async () => {
-       if (!window.electron) return;
-       const result = await window.electron.invoke('music-get-devices');
+       if (!window.ntmusic && !window.electron) return;
+       const result = await engineCmd('get-devices');
        if (result.status === 'success' && result.devices) {
            deviceSelect.innerHTML = ''; // Clear existing options
 
            // Add default device option
            const defaultOption = document.createElement('option');
            defaultOption.value = 'default';
-           defaultOption.textContent = '默认设备';
+           defaultOption.textContent = '榛樿璁惧';
            deviceSelect.appendChild(defaultOption);
 
            // Add WASAPI devices
@@ -1071,7 +1092,7 @@ class WebNowPlayingAdapter {
    };
 
    const configureOutput = async () => {
-       if (!window.electron) return;
+       if (!window.ntmusic && !window.electron) return;
        
        const selectedDeviceId = deviceSelect.value === 'default' ? null : parseInt(deviceSelect.value, 10);
        const useExclusive = wasapiSwitch.checked;
@@ -1086,7 +1107,7 @@ class WebNowPlayingAdapter {
        currentDeviceId = selectedDeviceId;
        useWasapiExclusive = useExclusive;
 
-       await window.electron.invoke('music-configure-output', {
+       await engineCmd('configure-output', {
            device_id: currentDeviceId,
            exclusive: useWasapiExclusive
        });
@@ -1097,7 +1118,7 @@ class WebNowPlayingAdapter {
 
   // --- Upsampling Control ---
   const configureUpsampling = async () => {
-      if (!window.electron) return;
+      if (!window.ntmusic && !window.electron) return;
       const selectedRate = parseInt(upsamplingSelect.value, 10);
       
       if (selectedRate === targetUpsamplingRate) {
@@ -1107,7 +1128,7 @@ class WebNowPlayingAdapter {
       targetUpsamplingRate = selectedRate;
       
       console.log(`Configuring upsampling: Target Rate=${targetUpsamplingRate}`);
-      await window.electron.invoke('music-configure-upsampling', {
+      await engineCmd('configure-upsampling', {
           target_samplerate: targetUpsamplingRate > 0 ? targetUpsamplingRate : null
       });
   };
@@ -1117,11 +1138,11 @@ class WebNowPlayingAdapter {
   // --- EQ Control ---
   const populateEqPresets = () => {
        const presetNames = {
-           'balance': '平衡',
-           'classical': '古典',
-           'pop': '流行',
-           'rock': '摇滚',
-           'electronic': '电子'
+           'balance': '骞宠　',
+           'classical': '鍙ゅ吀',
+           'pop': '娴佽',
+           'rock': '鎽囨粴',
+           'electronic': '鐢靛瓙'
        };
        for (const preset in eqPresets) {
            const option = document.createElement('option');
@@ -1171,7 +1192,7 @@ class WebNowPlayingAdapter {
   };
 
   const sendEqSettings = async () => {
-      if (!window.electron) return;
+      if (!window.ntmusic && !window.electron) return;
 
       const newBands = {};
       for (const band in eqBands) {
@@ -1181,7 +1202,7 @@ class WebNowPlayingAdapter {
       
       eqEnabled = eqSwitch.checked;
 
-      await window.electron.invoke('music-set-eq', {
+      await engineCmd('set-eq', {
           bands: newBands,
           enabled: eqEnabled
       });
@@ -1193,21 +1214,25 @@ class WebNowPlayingAdapter {
   });
 
   eqTypeSelect.addEventListener('change', async () => {
-      if (!window.electron) return;
-      const result = await window.electron.invoke('music-set-eq-type', { type: eqTypeSelect.value });
+      if (!window.ntmusic && !window.electron) return;
+      const result = await engineCmd('set-eq-type', { type: eqTypeSelect.value });
       if (result.status === 'success') {
-          updateUIWithState(result.state);
+          if (store) {
+              store.ingest({ type: 'playback.state', state: result.state });
+          } else {
+              updateUIWithState(result.state);
+          }
       }
   });
 
   const updateOptimizations = async () => {
-      if (!window.electron) return;
+      if (!window.ntmusic && !window.electron) return;
       const ditherChoice = ditherTypeSelect ? ditherTypeSelect.value : (ditherSwitch.checked ? 'tpdf24' : 'off');
       const ditherBits = ditherChoice === 'tpdf16' ? 16 : 24;
       const ditherEnabled = ditherSwitch.checked && ditherChoice !== 'off';
       const ditherType = ditherEnabled ? 'tpdf' : 'off';
       const resamplerMode = resamplerSelect ? resamplerSelect.value : 'auto';
-      await window.electron.invoke('music-configure-optimizations', {
+      await engineCmd('configure-optimizations', {
           dither_enabled: ditherEnabled,
           dither_type: ditherType,
           dither_bits: ditherBits,
@@ -1240,7 +1265,7 @@ class WebNowPlayingAdapter {
 
   const populateCaptureDevices = async () => {
       if (!window.electron || !captureDeviceSelect) return;
-      const result = await window.electron.invoke('music-get-capture-devices');
+      const result = await engineCmd('get-capture-devices');
       const devices = result && result.devices ? result.devices : [];
       captureDeviceSelect.innerHTML = '';
       if (!devices.length) {
@@ -1263,45 +1288,45 @@ class WebNowPlayingAdapter {
       const url = streamUrlInput.value.trim();
       if (!url) return;
       setInputMode('stream');
-      trackTitle.textContent = '流媒体播放';
+      trackTitle.textContent = '娴佸獟浣撴挱鏀?;
       trackArtist.textContent = url;
       trackBitrate.textContent = '';
-      const result = await window.electron.invoke('music-load-stream', { url });
+      const result = await engineCmd('load-stream', { url });
       if (result.status === 'success') {
           const controlOk = await trySendControl(CONTROL_COMMANDS.PLAY);
           if (!controlOk) {
-              await window.electron.invoke('music-play');
+              await engineCmd('play');
           }
       }
   };
 
   const stopStream = async () => {
-      if (!window.electron) return;
+      if (!window.ntmusic && !window.electron) return;
       const controlOk = await trySendControl(CONTROL_COMMANDS.STOP);
       if (!controlOk) {
-          await window.electron.invoke('music-stop');
+          await engineCmd('stop');
       }
   };
 
   const startCapture = async () => {
-      if (!window.electron) return;
+      if (!window.ntmusic && !window.electron) return;
       setInputMode('capture');
-      trackTitle.textContent = '系统捕获';
+      trackTitle.textContent = '绯荤粺鎹曡幏';
       trackArtist.textContent = 'LIVE';
       trackBitrate.textContent = '';
       const device_id = captureDeviceSelect ? captureDeviceSelect.value : 'default';
-      const result = await window.electron.invoke('music-capture-start', { device_id });
+      const result = await engineCmd('capture-start', { device_id });
       if (result.status === 'success') {
           const controlOk = await trySendControl(CONTROL_COMMANDS.PLAY);
           if (!controlOk) {
-              await window.electron.invoke('music-play');
+              await engineCmd('play');
           }
       }
   };
 
   const stopCapture = async () => {
-      if (!window.electron) return;
-      await window.electron.invoke('music-capture-stop');
+      if (!window.ntmusic && !window.electron) return;
+      await engineCmd('capture-stop');
   };
 
   const setupSourceControls = () => {
@@ -1310,7 +1335,7 @@ class WebNowPlayingAdapter {
           if (currentInputMode !== inputSourceSelect.value) {
               const controlOk = await trySendControl(CONTROL_COMMANDS.STOP);
               if (!controlOk) {
-                  await window.electron.invoke('music-stop');
+                  await engineCmd('stop');
               }
           }
           setInputMode(inputSourceSelect.value);
@@ -1323,7 +1348,7 @@ class WebNowPlayingAdapter {
 
    // --- Electron IPC and Initialization ---
     const setupElectronHandlers = () => {
-        if (!window.electron) return;
+        if (!window.ntmusic && !window.electron) return;
 
         if (quickImportBtn && addFolderBtn) {
             quickImportBtn.addEventListener('click', () => addFolderBtn.click());
@@ -1370,7 +1395,11 @@ class WebNowPlayingAdapter {
         // Listen for errors from the main process (e.g., engine connection failed)
         window.electron.on('audio-engine-error', ({ message }) => {
             console.error("Received error from main process:", message);
-            // You can display this error to the user, e.g., in a toast notification
+            // Legacy UI: show banner as warning
+            const banner = document.querySelector('.legacy-banner');
+            if (banner) {
+                banner.textContent = `Legacy UI：引擎异常 - ${message || '未知错误'}`;
+            }
         });
 
         // Listen for track changes from the main process (e.g., from AI control)
@@ -1391,7 +1420,7 @@ class WebNowPlayingAdapter {
         const fragment = document.createDocumentFragment();
         songsToRender.forEach((track) => {
             const li = document.createElement('li');
-            li.textContent = track.title || '未知标题';
+            li.textContent = track.title || '鏈煡鏍囬';
             const originalIndex = playlist.indexOf(track);
             li.dataset.index = originalIndex;
             if (originalIndex === currentTrackIndex) {
@@ -1414,18 +1443,18 @@ class WebNowPlayingAdapter {
            renderLyrics();
        } else {
            // If no local lyrics, try fetching from network
-           lyricsList.innerHTML = '<li class="no-lyrics">正在网络上搜索歌词...</li>';
+           lyricsList.innerHTML = '<li class="no-lyrics">姝ｅ湪缃戠粶涓婃悳绱㈡瓕璇?..</li>';
            try {
                const fetchedLrc = await window.electron.invoke('music-fetch-lyrics', { artist, title });
                if (fetchedLrc) {
                    currentLyrics = parseLrc(fetchedLrc);
                    renderLyrics();
                } else {
-                   lyricsList.innerHTML = '<li class="no-lyrics">暂无歌词</li>';
+                   lyricsList.innerHTML = '<li class="no-lyrics">鏆傛棤姝岃瘝</li>';
                }
            } catch (error) {
                console.error('Failed to fetch lyrics from network:', error);
-               lyricsList.innerHTML = '<li class="no-lyrics">歌词获取失败</li>';
+               lyricsList.innerHTML = '<li class="no-lyrics">姝岃瘝鑾峰彇澶辫触</li>';
            }
        }
    };
@@ -1559,7 +1588,7 @@ class WebNowPlayingAdapter {
    const resetLyrics = () => {
        currentLyrics = [];
        currentLyricIndex = -1;
-       lyricsList.innerHTML = '<li class="no-lyrics">加载歌词中...</li>';
+       lyricsList.innerHTML = '<li class="no-lyrics">鍔犺浇姝岃瘝涓?..</li>';
        lyricsList.style.transform = 'translateY(0px)';
    };
 
@@ -1681,6 +1710,7 @@ class WebNowPlayingAdapter {
             uiModeToggle.addEventListener('change', applyUiMode);
         }
         applyUiMode();
+        markLegacyHint();
 
         setupElectronHandlers();
         setupSourceControls();
@@ -1688,7 +1718,10 @@ class WebNowPlayingAdapter {
         updateModeButton();
         await initializeTheme();
         await initNtaSpectrum();
-        connectEngineSocket();
+        wireEngineEvents();
+        if (!animationFrameId) {
+            startVisualizerAnimation();
+        }
         
         // Setup phantom audio
         try {
@@ -1708,7 +1741,7 @@ class WebNowPlayingAdapter {
                 await loadTrack(0, false); // Wait for the track to load
             }
             // Sync initial volume
-            const initialState = await window.electron.invoke('music-get-state');
+            const initialState = await engineCmd('state');
             if (initialState && initialState.state && initialState.state.volume !== undefined) {
                 volumeSlider.value = initialState.state.volume;
                 updateVolumeSliderBackground(initialState.state.volume);
@@ -1720,7 +1753,7 @@ class WebNowPlayingAdapter {
        await populateCaptureDevices();
       createEqBands(); // Create EQ sliders
       populateEqPresets(); // Populate EQ presets
-       const initialDeviceState = await window.electron.invoke('music-get-state');
+       const initialDeviceState = await engineCmd('state');
        if (initialDeviceState && initialDeviceState.state) {
            setInputMode(initialDeviceState.state.mode || 'file');
            currentDeviceId = initialDeviceState.state.device_id;
